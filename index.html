@@ -4,20 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d1726">
-<title>My Tracker</title>
+<title>Ricks Trackers</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root{
-  --bg:#08111d;
-  --panel:#111d2d;
-  --panel2:#0d1726;
-  --line:#22334d;
-  --text:#f6f8fb;
-  --muted:#91a3bc;
-  --green:#22c77a;
-  --red:#ff4d5e;
-  --amber:#f2b544;
-  --blue:#4c9cff;
-  --shadow:0 12px 30px rgba(0,0,0,.28);
+  --bg:#08111d; --panel:#111d2d; --panel2:#0d1726; --line:#22334d;
+  --text:#f6f8fb; --muted:#91a3bc; --green:#22c77a; --red:#ff4d5e;
+  --amber:#f2b544; --blue:#4c9cff; --shadow:0 12px 30px rgba(0,0,0,.28);
 }
 *{box-sizing:border-box}
 html,body{margin:0;background:linear-gradient(180deg,#07101b,#0b1523 65%,#08111d);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
@@ -34,25 +28,9 @@ body{min-height:100vh}
 .assetname{font-size:24px;font-weight:850}
 .subtitle{font-size:13px;color:var(--muted);margin-top:4px}
 .pill{border-radius:999px;padding:7px 11px;font-size:12px;font-weight:900}
-.secure{background:#153827;color:#8cf0b6}
-.disarmed{background:#3a2d17;color:#ffd381}
-.alarm{background:#4a1d25;color:#ffabb4}
-.moving{background:#17314c;color:#a9d5ff}
-.map{height:230px;margin-top:14px;border-radius:18px;position:relative;overflow:hidden;border:1px solid #28405f;
-background:
-linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px) 0 0/38px 38px,
-linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px) 0 0/38px 38px,
-radial-gradient(circle at 25% 34%,#1c3854 0 4%,transparent 4.5%),
-radial-gradient(circle at 78% 72%,#173247 0 4%,transparent 4.5%),
-linear-gradient(145deg,#15263a,#0d1929);}
-.road{position:absolute;background:#3b506a;border-radius:10px;opacity:.78}
-.r1{width:130%;height:11px;left:-10%;top:47%;transform:rotate(-12deg)}
-.r2{width:110%;height:8px;left:18%;top:18%;transform:rotate(63deg)}
-.r3{width:90%;height:7px;left:-12%;top:74%;transform:rotate(28deg)}
-.pin{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:26px;height:26px;border-radius:50% 50% 50% 0;background:var(--blue);transform-origin:center;rotate:-45deg;box-shadow:0 0 0 8px rgba(76,156,255,.15),0 4px 12px rgba(0,0,0,.45)}
-.pin:after{content:"";position:absolute;width:8px;height:8px;border-radius:50%;background:#fff;left:9px;top:9px}
-.maplabel{position:absolute;left:12px;bottom:12px;background:rgba(5,12,22,.78);backdrop-filter:blur(8px);border:1px solid #2b3d58;border-radius:12px;padding:8px 10px;font-size:12px}
-.maplabel b{display:block;font-size:13px}
+.secure{background:#153827;color:#8cf0b6}.disarmed{background:#3a2d17;color:#ffd381}.alarm{background:#4a1d25;color:#ffabb4}.moving{background:#17314c;color:#a9d5ff}
+#map{height:280px;margin-top:14px;border-radius:18px;overflow:hidden;border:1px solid #28405f;z-index:1}
+.leaflet-container{background:#dfe8ef}
 .statusgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
 .stat{background:var(--panel2);border:1px solid var(--line);border-radius:15px;padding:12px}
 .label{text-transform:uppercase;font-size:10px;letter-spacing:.08em;color:var(--muted);font-weight:800}
@@ -61,44 +39,32 @@ linear-gradient(145deg,#15263a,#0d1929);}
 .actionrow{display:grid;grid-template-columns:1.2fr 1fr;gap:10px;margin-top:12px}
 button{font-family:inherit}
 .bigbtn{border:0;border-radius:16px;padding:15px 14px;font-size:16px;font-weight:900}
-.armbtn{background:var(--green);color:#062116}
-.disarmbtn{background:var(--amber);color:#2d2104}
-.livebtn{background:var(--blue);color:#fff}
-.secondary{background:#1a2a40;color:#e7eef8;border:1px solid #2a3d5a}
-.danger{background:#431d24;color:#ffd8dd;border:1px solid #65303a}
+.armbtn{background:var(--green);color:#062116}.disarmbtn{background:var(--amber);color:#2d2104}.livebtn{background:var(--blue);color:#fff}
+.secondary{background:#1a2a40;color:#e7eef8;border:1px solid #2a3d5a}.danger{background:#431d24;color:#ffd8dd;border:1px solid #65303a}
 .section{margin-top:12px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:14px;box-shadow:var(--shadow)}
 .section h3{margin:0 0 10px;font-size:16px}
 .quick{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
 .quick button{border-radius:13px;padding:12px 8px;font-weight:800;font-size:12px}
+.geochoices{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}
+.geobtn{border-radius:13px;padding:12px 8px;font-weight:850;font-size:13px;background:#17263a;color:#dfe9f7;border:1px solid #2a3e5c}
+.geobtn.active{background:#244f7b;color:#fff;border-color:#4c9cff}
 .banner{display:none;margin-top:12px;padding:13px;border-radius:15px;font-weight:800}
-.banner.show{display:block}
-.banner.count{background:#382b16;color:#ffd989;border:1px solid #5e4725}
-.banner.red{background:#481c24;color:#ffb0b8;border:1px solid #71313c}
-.banner.green{background:#153827;color:#94efbd;border:1px solid #24563e}
+.banner.show{display:block}.banner.count{background:#382b16;color:#ffd989;border:1px solid #5e4725}.banner.red{background:#481c24;color:#ffb0b8;border:1px solid #71313c}.banner.green{background:#153827;color:#94efbd;border:1px solid #24563e}
 .timeline{display:flex;flex-direction:column;gap:8px}
 .event{display:grid;grid-template-columns:10px 1fr auto;gap:9px;align-items:start;padding:9px 0;border-bottom:1px solid #1d2b40}
 .event:last-child{border-bottom:0}
-.dot{width:9px;height:9px;border-radius:50%;margin-top:5px;background:#5c718e}
-.dot.red{background:var(--red)} .dot.green{background:var(--green)} .dot.blue{background:var(--blue)} .dot.amber{background:var(--amber)}
+.dot{width:9px;height:9px;border-radius:50%;margin-top:5px;background:#5c718e}.dot.red{background:var(--red)}.dot.green{background:var(--green)}.dot.blue{background:var(--blue)}.dot.amber{background:var(--amber)}
 .etitle{font-size:13px;font-weight:800}.edetail{font-size:12px;color:var(--muted);margin-top:2px}.etime{font-size:11px;color:var(--muted)}
 .dataBar{height:10px;background:#0b1421;border-radius:999px;overflow:hidden;border:1px solid #1e2d42;margin-top:8px}
 .dataFill{height:100%;width:11%;background:linear-gradient(90deg,#4c9cff,#22c77a)}
 .note{font-size:11px;color:var(--muted);margin-top:7px;line-height:1.4}
 .footer{text-align:center;color:#71839b;font-size:11px;padding-top:16px}
-@media(max-width:420px){
-  .map{height:205px}
-  .statusgrid{gap:8px}
-  .value{font-size:17px}
-  .quick{grid-template-columns:1fr 1fr}
-}
+@media(max-width:420px){#map{height:240px}.statusgrid{gap:8px}.value{font-size:17px}.quick{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="topbar">
-    <div><div class="brand">My Tracker</div><div class="tag">Trailer + Show Car</div></div>
-    <div class="tag">DEMO</div>
-  </div>
+  <div class="topbar"><div><div class="brand">Ricks Trackers</div><div class="tag">Trailer + Show Car</div></div><div class="tag">DEMO</div></div>
 
   <div class="tabs">
     <button class="tab active" id="tab-trailer" onclick="switchAsset('trailer')">Car Trailer</button>
@@ -107,19 +73,11 @@ button{font-family:inherit}
 
   <div class="hero">
     <div class="herohead">
-      <div>
-        <div class="assetname" id="assetName">Car Trailer</div>
-        <div class="subtitle" id="assetSub">Home geofence • parked</div>
-      </div>
+      <div><div class="assetname" id="assetName">Car Trailer</div><div class="subtitle" id="assetSub">Home geofence • parked</div></div>
       <div class="pill secure" id="statusPill">SECURE</div>
     </div>
 
-    <div class="map">
-      <div class="road r1"></div><div class="road r2"></div><div class="road r3"></div>
-      <div class="pin" id="pin"></div>
-      <div class="maplabel"><b id="mapPlace">Home</b><span id="coords">36.77600, -76.03800</span></div>
-    </div>
-
+    <div id="map"></div>
     <div id="banner" class="banner"></div>
 
     <div class="statusgrid">
@@ -129,6 +87,7 @@ button{font-family:inherit}
       <div class="stat"><div class="label">Tracker battery</div><div class="value" id="batteryVal">98%</div></div>
       <div class="stat"><div class="label">External power</div><div class="value smallv" id="powerVal">Connected</div></div>
       <div class="stat"><div class="label">LTE</div><div class="value" id="lteVal">Good</div></div>
+      <div class="stat" style="grid-column:1/-1"><div class="label">Geofence radius</div><div class="value smallv" id="geoVal">500 ft</div></div>
     </div>
 
     <div class="actionrow">
@@ -138,9 +97,19 @@ button{font-family:inherit}
   </div>
 
   <div class="section">
+    <h3>Geofence radius</h3>
+    <div class="geochoices">
+      <button class="geobtn" id="geo100" onclick="setGeofence(100)">100 ft</button>
+      <button class="geobtn active" id="geo500" onclick="setGeofence(500)">500 ft</button>
+      <button class="geobtn" id="geo1000" onclick="setGeofence(1000)">1000 ft</button>
+    </div>
+    <div class="note">The circle on the map changes immediately. Later this same choice will update the real tracker/API geofence.</div>
+  </div>
+
+  <div class="section">
     <h3>Test the alarm</h3>
     <div class="quick">
-      <button class="secondary" onclick="simulateMove()">Move trailer</button>
+      <button class="secondary" onclick="simulateMove()">Move tracker</button>
       <button class="danger" onclick="geofenceBreach()">Geofence breach</button>
       <button class="danger" onclick="powerLoss()">Cut power</button>
       <button class="secondary" onclick="resetAsset()">Reset</button>
@@ -150,8 +119,8 @@ button{font-family:inherit}
 
   <div class="section">
     <h3>Monthly data estimate</h3>
-    <div class="row" style="display:flex;justify-content:space-between"><span class="label">Estimated usage</span><b id="dataVal">~11 MB / 100 MB</b></div>
-    <div class="dataBar"><div class="dataFill" id="dataFill"></div></div>
+    <div style="display:flex;justify-content:space-between"><span class="label">Estimated usage</span><b>~11 MB / 100 MB</b></div>
+    <div class="dataBar"><div class="dataFill"></div></div>
     <div class="note">Example: daily ping plus one 3-hour alarm session at a 10-second reporting interval.</div>
   </div>
 
@@ -160,133 +129,87 @@ button{font-family:inherit}
     <div class="timeline" id="timeline"></div>
   </div>
 
-  <div class="footer">Interactive demo only • no real Particle device connected yet</div>
+  <div class="footer">Interactive demo • real street map • no Particle device connected yet</div>
 </div>
 
 <script>
-const state = {
- trailer:{name:"Car Trailer",armed:true,alarm:false,mode:"Daily ping",speed:0,batt:98,power:true,lte:"Good",lat:36.77600,lon:-76.03800,place:"Home",sub:"Home geofence • parked"},
- car:{name:"Show Car",armed:true,alarm:false,mode:"Daily ping",speed:0,batt:96,power:true,lte:"Good",lat:36.77636,lon:-76.03754,place:"With trailer",sub:"Home geofence • parked"}
+const state={
+ trailer:{name:"Car Trailer",armed:true,alarm:false,mode:"Daily ping",speed:0,batt:98,power:true,lte:"Good",lat:36.77600,lon:-76.03800,homeLat:36.77600,homeLon:-76.03800,sub:"Home geofence • parked",geofence:500,trail:[]},
+ car:{name:"Show Car",armed:true,alarm:false,mode:"Daily ping",speed:0,batt:96,power:true,lte:"Good",lat:36.77636,lon:-76.03754,homeLat:36.77636,homeLon:-76.03754,sub:"Home geofence • parked",geofence:500,trail:[]}
 };
-let current="trailer", countdownTimer=null, trackTimer=null, trackTicks=0;
+let current="trailer",countdownTimer=null,trackTimer=null,trackTicks=0;
 let events=[
  {c:"green",t:"System secure",d:"Inside Home geofence",time:"Now"},
  {c:"blue",t:"Daily check-in",d:"GPS, LTE and battery normal",time:"Today"},
  {c:"green",t:"Tracker armed",d:"Motion monitoring enabled",time:"Today"}
 ];
 
+const map=L.map('map',{zoomControl:true}).setView([state.trailer.lat,state.trailer.lon],16);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{
+ maxZoom:19,
+ attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+const marker=L.marker([state.trailer.lat,state.trailer.lon]).addTo(map).bindPopup("Car Trailer");
+let circle=L.circle([state.trailer.homeLat,state.trailer.homeLon],{radius:feetToMeters(state.trailer.geofence),weight:2,fillOpacity:.10}).addTo(map);
+let route=L.polyline([], {weight:4}).addTo(map);
+
+function feetToMeters(ft){return ft*0.3048}
 function s(){return state[current]}
-function statusText(){
+function statusText(){const x=s();if(x.alarm)return["ALARM","alarm"];if(!x.armed)return["DISARMED","disarmed"];if(x.speed>0)return["MOVING","moving"];return["SECURE","secure"]}
+
+function updateMap(center=true){
  const x=s();
- if(x.alarm) return ["ALARM","alarm"];
- if(!x.armed) return ["DISARMED","disarmed"];
- if(x.speed>0) return ["MOVING","moving"];
- return ["SECURE","secure"];
+ marker.setLatLng([x.lat,x.lon]).bindPopup(x.name);
+ circle.setLatLng([x.homeLat,x.homeLon]).setRadius(feetToMeters(x.geofence));
+ route.setLatLngs(x.trail);
+ if(center) map.setView([x.lat,x.lon], x.geofence<=100?18:x.geofence<=500?17:16);
+ setTimeout(()=>map.invalidateSize(),100);
 }
+
 function render(){
- const x=s(), st=statusText();
+ const x=s(),st=statusText();
  document.getElementById("assetName").textContent=x.name;
  document.getElementById("assetSub").textContent=x.sub;
- const p=document.getElementById("statusPill"); p.textContent=st[0]; p.className="pill "+st[1];
- document.getElementById("coords").textContent=x.lat.toFixed(5)+", "+x.lon.toFixed(5);
- document.getElementById("mapPlace").textContent=x.place;
+ const p=document.getElementById("statusPill");p.textContent=st[0];p.className="pill "+st[1];
  document.getElementById("armedVal").textContent=x.armed?"YES":"NO";
  document.getElementById("trackVal").textContent=x.mode;
  document.getElementById("speedVal").textContent=x.speed+" mph";
  document.getElementById("batteryVal").textContent=x.batt+"%";
  document.getElementById("powerVal").textContent=x.power?"Connected":"Disconnected";
  document.getElementById("lteVal").textContent=x.lte;
- const b=document.getElementById("armBtn");
- b.textContent=x.armed?"DISARM":"ARM";
- b.className="bigbtn "+(x.armed?"disarmbtn":"armbtn");
+ document.getElementById("geoVal").textContent=x.geofence+" ft";
+ const b=document.getElementById("armBtn");b.textContent=x.armed?"DISARM":"ARM";b.className="bigbtn "+(x.armed?"disarmbtn":"armbtn");
  document.getElementById("tab-trailer").classList.toggle("active",current==="trailer");
  document.getElementById("tab-car").classList.toggle("active",current==="car");
- renderEvents();
+ [100,500,1000].forEach(v=>document.getElementById("geo"+v).classList.toggle("active",x.geofence===v));
+ renderEvents();updateMap();
 }
+
 function renderEvents(){
- const el=document.getElementById("timeline");
- el.innerHTML=events.slice(0,7).map(e=>`<div class="event"><div class="dot ${e.c}"></div><div><div class="etitle">${e.t}</div><div class="edetail">${e.d}</div></div><div class="etime">${e.time}</div></div>`).join("");
+ document.getElementById("timeline").innerHTML=events.slice(0,7).map(e=>`<div class="event"><div class="dot ${e.c}"></div><div><div class="etitle">${e.t}</div><div class="edetail">${e.d}</div></div><div class="etime">${e.time}</div></div>`).join("");
 }
-function addEvent(c,t,d){
- events.unshift({c,t,d,time:new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})});
- renderEvents();
-}
-function setBanner(text,type){
- const b=document.getElementById("banner");
- b.textContent=text;b.className="banner show "+type;
-}
-function clearBanner(){document.getElementById("banner").className="banner";}
+function addEvent(c,t,d){events.unshift({c,t,d,time:new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})});renderEvents()}
+function setBanner(text,type){const b=document.getElementById("banner");b.textContent=text;b.className="banner show "+type}
+function clearBanner(){document.getElementById("banner").className="banner"}
 
 function switchAsset(id){current=id;clearBanner();render()}
-function toggleArm(){
- const x=s();x.armed=!x.armed;x.alarm=false;x.speed=0;x.mode=x.armed?"Daily ping":"Travel mode";x.sub=x.armed?"Home geofence • parked":"Disarmed • travel permitted";
- addEvent(x.armed?"green":"amber",x.armed?"Tracker armed":"Tracker disarmed",x.armed?"10-second movement trigger enabled":"Movement alarms suppressed");
- clearBanner();render();
-}
+function setGeofence(feet){const x=s();x.geofence=feet;x.sub=(x.armed?"Home geofence • ":"Disarmed • ")+feet+" ft radius";setBanner("Geofence radius set to "+feet+" ft.","green");addEvent("blue","Geofence changed",feet+" ft radius selected");render()}
+function toggleArm(){const x=s();x.armed=!x.armed;x.alarm=false;x.speed=0;x.mode=x.armed?"Daily ping":"Travel mode";x.sub=x.armed?"Home geofence • parked":"Disarmed • travel permitted";addEvent(x.armed?"green":"amber",x.armed?"Tracker armed":"Tracker disarmed",x.armed?"10-second movement trigger enabled":"Movement alarms suppressed");clearBanner();render()}
 function simulateMove(){
- clearInterval(countdownTimer);
- let left=10;
- setBanner("Movement detected. Verifying for 10 seconds… "+left+"s","count");
- addEvent("amber","Movement detected","10-second verification started");
- countdownTimer=setInterval(()=>{
-   left--;
-   if(left>0) setBanner("Movement detected. Verifying for 10 seconds… "+left+"s","count");
-   else{
-     clearInterval(countdownTimer);
-     const x=s();
-     if(!x.armed){
-       setBanner("Movement confirmed, but tracker is DISARMED.","green");
-       addEvent("blue","Movement ignored","Tracker was disarmed");
-       return;
-     }
-     triggerAlarm("MOVEMENT ALARM","10 seconds of sustained movement detected");
-   }
- },1000);
+ clearInterval(countdownTimer);let left=10;setBanner("Movement detected. Verifying for 10 seconds… "+left+"s","count");addEvent("amber","Movement detected","10-second verification started");
+ countdownTimer=setInterval(()=>{left--;if(left>0)setBanner("Movement detected. Verifying for 10 seconds… "+left+"s","count");else{clearInterval(countdownTimer);const x=s();if(!x.armed){setBanner("Movement confirmed, but tracker is DISARMED.","green");addEvent("blue","Movement ignored","Tracker was disarmed");return}triggerAlarm("MOVEMENT ALARM","10 seconds of sustained movement detected")}},1000)
 }
-function triggerAlarm(title,detail){
- const x=s();x.alarm=true;x.mode="Every 10 sec";x.speed=22;x.sub="Alarm active • tracking";x.place="Moving";
- setBanner("🚨 "+title+" — phone alert sent. Tracking every 10 seconds.","red");
- addEvent("red",title,detail);
- startTracking();
- render();
-}
-function geofenceBreach(){
- const x=s();x.alarm=true;x.mode="Every 10 sec";x.speed=34;x.lat+=.006;x.lon+=.005;x.place="Outside geofence";x.sub="Geofence breached • alarm active";
- setBanner("🚨 GEOFENCE BREACH — high-priority alert sent.","red");
- addEvent("red","Geofence breach","Tracker exited the Home geofence");
- startTracking();render();
-}
-function powerLoss(){
- const x=s();x.power=false;x.alarm=true;x.mode="Every 10 sec";x.sub="Backup battery • alarm active";
- setBanner("🚨 EXTERNAL POWER LOST — running on internal battery.","red");
- addEvent("red","External power lost","Switched to internal backup battery");
- startTracking();render();
-}
-function startLive(){
- const x=s();x.mode="Every 10 sec";x.sub="Live tracking requested";setBanner("Live tracking active — updating every 10 seconds.","green");
- addEvent("blue","Live tracking started","10-second update interval");
- startTracking();render();
-}
+function triggerAlarm(title,detail){const x=s();x.alarm=true;x.mode="Every 10 sec";x.speed=22;x.sub="Alarm active • tracking";setBanner("🚨 "+title+" — phone alert sent. Tracking every 10 seconds.","red");addEvent("red",title,detail);startTracking();render()}
+function geofenceBreach(){const x=s();x.alarm=true;x.mode="Every 10 sec";x.speed=34;const delta=(x.geofence/5280)/69; x.lat=x.homeLat+delta*1.4;x.lon=x.homeLon+delta*1.2;x.trail.push([x.homeLat,x.homeLon],[x.lat,x.lon]);x.sub="Geofence breached • alarm active";setBanner("🚨 GEOFENCE BREACH — high-priority alert sent.","red");addEvent("red","Geofence breach","Tracker exited the Home geofence");startTracking();render()}
+function powerLoss(){const x=s();x.power=false;x.alarm=true;x.mode="Every 10 sec";x.sub="Backup battery • alarm active";setBanner("🚨 EXTERNAL POWER LOST — running on internal battery.","red");addEvent("red","External power lost","Switched to internal backup battery");startTracking();render()}
+function startLive(){const x=s();x.mode="Every 10 sec";x.sub="Live tracking requested";setBanner("Live tracking active — updating every 10 seconds.","green");addEvent("blue","Live tracking started","10-second update interval");startTracking();render()}
 function startTracking(){
- clearInterval(trackTimer);trackTicks=0;
- trackTimer=setInterval(()=>{
-   const x=s();
-   trackTicks++;
-   if(x.speed>0){
-     x.lat += .00045;
-     x.lon += .00028;
-     x.batt=Math.max(1,x.batt-(trackTicks%12===0?1:0));
-     document.getElementById("coords").textContent=x.lat.toFixed(5)+", "+x.lon.toFixed(5);
-     document.getElementById("batteryVal").textContent=x.batt+"%";
-   }
- },10000);
+ clearInterval(trackTimer);trackTicks=0;const x=s();if(!x.trail.length)x.trail.push([x.lat,x.lon]);
+ trackTimer=setInterval(()=>{trackTicks++;const x=s();if(x.speed>0){x.lat+=.00045;x.lon+=.00028;x.trail.push([x.lat,x.lon]);x.batt=Math.max(1,x.batt-(trackTicks%12===0?1:0));document.getElementById("batteryVal").textContent=x.batt+"%";updateMap(false)}},10000)
 }
 function resetAsset(){
- clearInterval(countdownTimer);clearInterval(trackTimer);
- const x=s();x.alarm=false;x.speed=0;x.power=true;x.mode=x.armed?"Daily ping":"Travel mode";x.place=current==="trailer"?"Home":"With trailer";x.sub=x.armed?"Home geofence • parked":"Disarmed • travel permitted";
- setBanner("System reset. Tracker is secure.","green");
- addEvent("green","System reset","Returned to normal monitoring");
- render();
+ clearInterval(countdownTimer);clearInterval(trackTimer);const x=s();x.alarm=false;x.speed=0;x.power=true;x.mode=x.armed?"Daily ping":"Travel mode";x.lat=x.homeLat;x.lon=x.homeLon;x.trail=[];x.sub=x.armed?"Home geofence • parked":"Disarmed • travel permitted";setBanner("System reset. Tracker is secure.","green");addEvent("green","System reset","Returned to normal monitoring");render()
 }
 render();
 </script>
