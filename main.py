@@ -251,11 +251,50 @@ def status():
         try: read_imu_motion()
         except Exception as e: print(f"Particle IMU read skipped: {e}")
     return pub()
+def request_fresh_location():
+    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
+        return False
+    headers={
+        "Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}",
+        "Content-Type":"application/json",
+        "Accept":"application/json"
+    }
+    try:
+        cr=requests.post(
+            f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/cmd",
+            headers=headers,
+            json={"arg":'{"cmd":"get_loc"}'},
+            timeout=35
+        )
+        if not cr.ok:
+            print(f"Particle arm ping failed status={cr.status_code} body={cr.text[:300]}")
+            return False
+        try:
+            requests.post(
+                f"https://api.particle.io/v1/diagnostics/{PARTICLE_DEVICE_ID}/update",
+                headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"},
+                timeout=12
+            )
+        except Exception as e:
+            print(f"Particle arm vitals refresh skipped: {e}")
+        state["_vitals_checked"]=0
+        return True
+    except Exception as e:
+        print(f"Particle arm ping exception: {e}")
+        return False
+
 @app.post("/api/trailer/mode")
 def setmode(x:Mode):
     state["mode"]=x.mode
-    if x.mode=="off":state["alarm"]=False;state["alarm_reason"]=None
-    note("Mode changed",x.mode);return pub()
+    if x.mode=="off":
+        state["alarm"]=False;state["alarm_reason"]=None
+    if x.mode=="armed":
+        ok=request_fresh_location()
+        note("Mode changed","armed • fresh tracker location requested" if ok else "armed • tracker ping failed")
+        timeline("ARMED","Fresh tracker location requested" if ok else "Armed, but tracker ping failed",kind="mode")
+    else:
+        note("Mode changed",x.mode)
+    return pub()
 @app.post("/api/trailer/geofence")
 def setgeo(x:Fence):
     state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
