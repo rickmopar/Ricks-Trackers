@@ -32,7 +32,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
 const $=id=>document.getElementById(id);let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(map);
 function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000);return s<60?Math.floor(s)+' sec ago':s<3600?Math.floor(s/60)+' min ago':s<86400?Math.floor(s/3600)+' hr ago':Math.floor(s/86400)+' day ago'}
 function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
