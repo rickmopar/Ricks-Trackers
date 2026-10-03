@@ -1,4 +1,4 @@
-import os, math, time, hmac, requests
+import os, math, time, hmac, requests, threading
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -11,7 +11,12 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None}
+
+_alarm_poll_thread=None
+_alarm_poll_thread_lock=threading.Lock()
+_alarm_poll_wake=threading.Event()
+_alarm_poll_stop=threading.Event()
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -151,7 +156,11 @@ def miles(a,b,c,d):
     return r*2*math.atan2(math.sqrt(x),math.sqrt(1-x))
 def alarm(reason,key):
     if state["mode"]=="off":return
+    was_active=bool(state["alarm"])
     state["alarm"]=True;state["alarm_reason"]=reason
+    if not was_active:
+        state["_alarm_poll_next_at"]=0
+        _alarm_poll_wake.set()
     timeline("ALARM TRIGGERED",reason,kind="alert")
     note("ALARM",reason)
     gps="GPS unavailable" if state["lat"] is None else f'{state["lat"]:.6f}, {state["lon"]:.6f}'
@@ -300,8 +309,9 @@ def status():
         except Exception as e: print(f"Particle IMU read skipped: {e}")
     return pub()
 def request_fresh_location():
+    """Request one fresh Tracker One location using the existing Particle get_loc command."""
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
-        return False
+        return {"ok":False,"error":"Particle control is not configured"}
     headers={
         "Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}",
         "Content-Type":"application/json",
@@ -315,8 +325,14 @@ def request_fresh_location():
             timeout=35
         )
         if not cr.ok:
-            print(f"Particle arm ping failed status={cr.status_code} body={cr.text[:300]}")
-            return False
+            print(f"Particle fresh-location request failed status={cr.status_code} body={cr.text[:300]}")
+            return {"ok":False,"status_code":cr.status_code,"error":cr.text[:220]}
+        result=cr.json()
+        rv=result.get("return_value")
+        connected=result.get("connected",True)
+        if rv not in (0,None):
+            return {"ok":False,"online":bool(connected),"return_value":rv,
+                    "error":f"Tracker rejected get_loc command (return value {rv})"}
         try:
             requests.post(
                 f"https://api.particle.io/v1/diagnostics/{PARTICLE_DEVICE_ID}/update",
@@ -324,12 +340,59 @@ def request_fresh_location():
                 timeout=12
             )
         except Exception as e:
-            print(f"Particle arm vitals refresh skipped: {e}")
+            print(f"Particle vitals refresh skipped: {e}")
         state["_vitals_checked"]=0
-        return True
+        return {"ok":True,"online":bool(connected),"requested":True,"return_value":rv}
     except Exception as e:
-        print(f"Particle arm ping exception: {e}")
-        return False
+        print(f"Particle fresh-location exception: {e}")
+        return {"ok":False,"error":str(e)}
+
+def alarm_poll_worker():
+    """Single per-process worker that requests a fresh location every 60s while alarmed."""
+    print("Alarm location polling worker started")
+    while not _alarm_poll_stop.is_set():
+        if not state.get("alarm"):
+            state["_alarm_poll_next_at"]=None
+            _alarm_poll_wake.wait(1.0)
+            _alarm_poll_wake.clear()
+            continue
+
+        now=time.monotonic()
+        next_at=state.get("_alarm_poll_next_at")
+        if next_at is None or now>=next_at:
+            # Reserve the next slot before making the network call so repeated alarm
+            # events cannot create overlapping requests.
+            state["_alarm_poll_next_at"]=now+60.0
+            result=request_fresh_location()
+            if result.get("ok"):
+                note("Alarm tracking","Fresh tracker location requested automatically")
+                timeline("ALARM LOCATION POLL","Fresh Tracker One location requested",kind="tracking")
+            else:
+                print(f"Alarm location poll failed: {result.get('error')}")
+            if state.get("alarm"):
+                state["_alarm_poll_next_at"]=time.monotonic()+60.0
+            else:
+                state["_alarm_poll_next_at"]=None
+            continue
+
+        wait_for=max(0.1,min(1.0,next_at-now))
+        _alarm_poll_wake.wait(wait_for)
+        _alarm_poll_wake.clear()
+    print("Alarm location polling worker stopped")
+
+def ensure_alarm_poll_worker():
+    """Start exactly one polling worker for this Render process."""
+    global _alarm_poll_thread
+    with _alarm_poll_thread_lock:
+        if _alarm_poll_thread and _alarm_poll_thread.is_alive():
+            return
+        _alarm_poll_stop.clear()
+        _alarm_poll_thread=threading.Thread(
+            target=alarm_poll_worker,
+            name="alarm-location-poller",
+            daemon=True
+        )
+        _alarm_poll_thread.start()
 
 @app.post("/api/trailer/mode")
 def setmode(x:Mode):
@@ -345,7 +408,8 @@ def setmode(x:Mode):
         note("Mode changed","off • tracker entering low-power sleep with 60-minute check-ins")
         timeline("TRAVEL/OFF","Low-power sleep enabled • 60-minute check-ins",kind="mode")
     elif x.mode=="armed":
-        ok=request_fresh_location()
+        fresh=request_fresh_location()
+        ok=bool(fresh.get("ok"))
         note("Mode changed","armed • motion detection restored • fresh tracker location requested" if ok else "armed • motion restored • tracker ping failed")
         timeline("ARMED","Sleep disabled • motion detection MEDIUM • fresh location requested" if ok else "Sleep disabled • motion detection MEDIUM • tracker ping failed",kind="mode")
     else:
@@ -359,41 +423,17 @@ def setlive(x:Live):
     state["live"]=x.enabled; note("Live tracking request","Frequent updates requested" if x.enabled else "Normal updates requested"); return pub()
 @app.post("/api/trailer/ping")
 def ping_tracker():
-    if not PARTICLE_DEVICE_ID:
-        raise HTTPException(503,"Particle device ID is not configured")
-    if not PARTICLE_ACCESS_TOKEN:
-        raise HTTPException(503,"Particle API token is not configured yet")
-    headers={
-        "Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}",
-        "Content-Type":"application/json",
-        "Accept":"application/json"
-    }
-    cr=requests.post(
-        f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/cmd",
-        headers=headers,
-        json={"arg":'{"cmd":"get_loc"}'},
-        timeout=35
-    )
-    if not cr.ok:
-        print(f"Particle cmd failed status={cr.status_code} body={cr.text[:300]}")
-        raise HTTPException(cr.status_code if cr.status_code < 500 else 502,
-                            f"Particle location request failed: {cr.text[:220]}")
-    result=cr.json()
-    rv=result.get("return_value")
-    connected=result.get("connected",True)
-    if rv not in (0,None):
-        raise HTTPException(502,f"Tracker rejected get_loc command (return value {rv})")
-    try:
-        requests.post(
-            f"https://api.particle.io/v1/diagnostics/{PARTICLE_DEVICE_ID}/update",
-            headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"},
-            timeout=12
-        )
-    except Exception as e:
-        print(f"Particle vitals refresh request skipped: {e}")
-    state["_vitals_checked"]=0
+    result=request_fresh_location()
+    if not result.get("ok"):
+        status_code=result.get("status_code",502)
+        if not PARTICLE_DEVICE_ID:
+            status_code=503
+        elif not PARTICLE_ACCESS_TOKEN:
+            status_code=503
+        raise HTTPException(status_code if status_code < 500 else 502,
+                            f"Particle location request failed: {result.get('error','unknown error')}")
     note("Tracker ping","Fresh location and vitals requested from Tracker One")
-    return {"ok":True,"online":bool(connected),"requested":True,"return_value":rv}
+    return result
 
 @app.post("/api/trailer/test-alert")
 def testalert():
@@ -416,7 +456,10 @@ def sethome():
 @app.post("/api/trailer/clear-alarm")
 def clear():
     state["alarm"]=False;state["alarm_reason"]=None
-    note("Alarm cleared","Returned to monitoring")
+    state["_alarm_poll_next_at"]=None
+    _alarm_poll_wake.set()
+    note("Alarm cleared","Returned to monitoring • automatic location polling stopped")
+    timeline("ALARM CLEARED","Automatic 60-second location polling stopped",kind="mode")
     return pub()
 @app.post("/api/particle/webhook")
 async def webhook(request:Request,authorization:Optional[str]=Header(default=None)):
@@ -564,6 +607,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     return {"ok":True,"lat":x.lat,"lon":x.lon,"speed_mph":round(x.speed_mph,1)}
 @app.on_event("startup")
 def startup_discover():
+    ensure_alarm_poll_worker()
     try: discover_telegram_chat()
     except Exception as e: print(f"Telegram startup discovery skipped: {e}")
     try:
@@ -575,5 +619,11 @@ def startup_discover():
             print(f"Particle IMU motion sensitivity={motion}")
     except Exception as e:
         print(f"Particle IMU setup exception: {e}")
+
+@app.on_event("shutdown")
+def shutdown_alarm_poll_worker():
+    _alarm_poll_stop.set()
+    _alarm_poll_wake.set()
+
 
 app.mount("/",StaticFiles(directory=".",html=True),name="static")
