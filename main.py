@@ -12,6 +12,7 @@ SID=os.getenv("TWILIO_ACCOUNT_SID","")
 AUTH=os.getenv("TWILIO_AUTH_TOKEN","")
 FROM=os.getenv("TWILIO_FROM_NUMBER","")
 TO=os.getenv("ALERT_TO_NUMBER","")
+TRIAL_MODE=os.getenv("TWILIO_TRIAL_MODE","true").lower()=="true"
 state={"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"sms_configured":False,"last_sms_at":None,"_key":None,"_epoch":0}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
@@ -32,9 +33,10 @@ def send_sms(body,key,force=False):
     if not sms_ready(): note("SMS not sent","Twilio settings are not configured"); return False
     now=time.time()
     if not force and state["_key"]==key and now-state["_epoch"]<120:return False
-    Client(SID,AUTH).messages.create(body=body,from_=FROM,to=TO)
+    send_body="sms_internal_alerts" if TRIAL_MODE else body
+    Client(SID,AUTH).messages.create(body=send_body,from_=FROM,to=TO)
     state["_key"],state["_epoch"]=key,now;state["last_sms_at"]=datetime.now(timezone.utc).isoformat()
-    note("Text alert sent",body[:120]);return True
+    note("Text alert sent",("Twilio trial internal-alert template" if TRIAL_MODE else body[:120]));return True
 def miles(a,b,c,d):
     r=3958.7613;p1,p2=math.radians(a),math.radians(c);dp=math.radians(c-a);dl=math.radians(d-b)
     x=math.sin(dp/2)**2+math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
@@ -49,7 +51,7 @@ def auth_webhook(h):
     if not h or not hmac.compare_digest(h,f"Bearer {TOKEN}"):raise HTTPException(401,"Invalid webhook authorization")
 
 @app.get("/api/health")
-def health(): return {"ok":True,"sms_configured":sms_ready()}
+def health(): return {"ok":True,"sms_configured":sms_ready(),"twilio_trial_mode":TRIAL_MODE}
 @app.get("/api/trailer/status")
 def status(): sms_ready();return pub()
 @app.post("/api/trailer/mode")
