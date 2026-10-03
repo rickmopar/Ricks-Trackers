@@ -28,7 +28,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="stat"><div class="label">Telegram alerts</div><div class="value" id="sms">—</div></div><div class="stat"><div class="label">Last alert</div><div class="value" id="lastsms">—</div></div>
 <div class="stat full"><div class="label">Current mode</div><div class="value" id="mode">—</div></div></div></div>
 <div class="card"><b>Geofence radius</b><div class="geos"><button id="g100" onclick="geo(100)">100 ft</button><button id="g500" onclick="geo(500)">500 ft</button><button id="g1000" onclick="geo(1000)">1000 ft</button></div></div>
-<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button onclick="setHome()">SET HOME HERE</button><button onclick="clearAlarm()">CLEAR ALARM</button><button type="button" class="test" id="testSmsBtn">TEST TELEGRAM ALERT</button></div></div>
+<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button onclick="setHome()">SET HOME HERE</button><button onclick="clearAlarm()">CLEAR ALARM</button><button type="button" class="test" id="pingBtn">PING TRACKER</button><button type="button" class="test" id="testSmsBtn">TEST TELEGRAM ALERT</button></div></div>
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
 const $=id=>document.getElementById(id);let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
@@ -49,6 +49,33 @@ async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST
 async function live(x){try{render(await api('/api/trailer/live',{method:'POST',body:JSON.stringify({enabled:x})}));msg(x?'Live tracking requested':'Normal updates restored')}catch(e){msg(e.message,'red')}}
 async function setHome(){try{render(await api('/api/trailer/set-home',{method:'POST',body:'{}'}));msg('Home position set to the current tracker location')}catch(e){msg(e.message,'red')}}
 async function clearAlarm(){try{render(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));msg('Alarm cleared')}catch(e){msg(e.message,'red')}}
+
+async function pingTracker(){
+  const b=$('pingBtn');
+  if(!b)return;
+  b.disabled=true;
+  const old=b.textContent;
+  b.textContent='PINGING…';
+  msg('Requesting fresh tracker location…','amber');
+  try{
+    const r=await api('/api/trailer/ping',{method:'POST',body:'{}'});
+    if(r.online===false){
+      b.textContent='TRACKER OFFLINE';
+      msg('Tracker is offline.','red');
+    }else{
+      b.textContent='LOCATION REQUESTED ✓';
+      msg('Tracker is online. Fresh location requested.','green');
+      setTimeout(refresh,2500);
+      setTimeout(refresh,7000);
+      setTimeout(refresh,12000);
+    }
+  }catch(e){
+    b.textContent='PING FAILED';
+    msg('Ping failed: '+e.message,'red');
+  }finally{
+    setTimeout(()=>{b.disabled=false;b.textContent=old},4000);
+  }
+}
 async function testSms(){
   const b=$('testSmsBtn');
   if(!b)return;
@@ -68,6 +95,8 @@ async function testSms(){
     setTimeout(()=>{b.disabled=false;b.textContent=old},3000);
   }
 }
+const pingButton=$('pingBtn');
+if(pingButton)pingButton.addEventListener('click',pingTracker);
 const testButton=$('testSmsBtn');
 if(testButton)testButton.addEventListener('click',testSms);
 refresh();setInterval(refresh,10000);
