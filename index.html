@@ -63,7 +63,8 @@ function render(s){latestState=s;$('conn').textContent='Connected';$('last').tex
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
 if(map&&marker&&fence&&route&&typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
 $('timeline').innerHTML=(s.timeline||[]).slice(0,12).map(e=>'<div class="event"><div class="et">'+esc(e.stage)+'</div><div class="ed">'+esc(e.detail||'')+' • '+new Date(e.time).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'})+'</div></div>').join('')||'No motion timeline yet.';
-$('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.'
+$('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.';
+}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function centerMap(){
   if(!map||!marker||typeof window.L==='undefined'){
