@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07101b"><title>Rick's Trackers • Home Base</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+:root{--bg:#07101b;--panel:#101b2a;--line:#26364b;--text:#f7f9fc;--muted:#93a4ba;--green:#25c77b;--red:#ff5063;--amber:#f4b544;--blue:#4d9cff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+.wrap{max-width:1440px;margin:auto;padding:18px}.top{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap}.brand{font-size:30px;font-weight:900}.small{font-size:12px;color:var(--muted)}a{color:#9ec7ff;text-decoration:none}
+.layout{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(420px,.8fr);gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px;margin-top:14px}
+#map{height:480px;border-radius:14px;overflow:hidden}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:12px}.stat{background:#0b1522;border:1px solid var(--line);border-radius:13px;padding:10px}.label{font-size:10px;text-transform:uppercase;color:var(--muted)}.value{font-size:18px;font-weight:900;margin-top:5px}
+.modegrid,.actions,.filters{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:12px;padding:10px 12px;font-weight:900;cursor:pointer}.active{outline:2px solid var(--blue);background:#1f5f91}.danger{background:#4a1d25}
+.pill{display:inline-block;padding:7px 11px;border-radius:999px;font-size:12px;font-weight:900}.secure{background:#143725;color:#8df0b8}.alarm{background:#4a1d25;color:#ffb1bb}.off{background:#3a2d17;color:#ffd789}
+.history{max-height:820px;overflow:auto;border-top:1px solid var(--line);margin-top:10px}.row{display:grid;grid-template-columns:170px 130px minmax(180px,1fr) 95px 80px;gap:10px;padding:10px 4px;border-bottom:1px solid #1f2e42;align-items:start;font-size:12px}.row.head{position:sticky;top:0;background:var(--panel);z-index:2;font-weight:900;color:var(--muted)}.title{font-weight:900;color:var(--text)}.muted{color:var(--muted)}.dbgood{color:#8df0b8}.dbbad{color:#ffd789}
+@media(max-width:1000px){.layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}#map{height:360px}.row{grid-template-columns:130px 95px 1fr}.row>*:nth-child(4),.row>*:nth-child(5){display:none}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="top">
+  <div><div class="brand">Rick's Trackers • Home Base</div><div class="small">Car Trailer • live status + complete history</div></div>
+  <div><a href="/">← PHONE APP</a> &nbsp; <span id="conn" class="small">Connecting…</span></div>
+</div>
+
+<div class="layout">
+<div>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <div><div style="font-size:22px;font-weight:900">Car Trailer</div><div id="sub" class="small">Waiting for tracker data</div></div>
+      <div id="pill" class="pill off">WAITING</div>
+    </div>
+    <div class="modegrid">
+      <button id="marmed" onclick="mode('armed')">ARMED</button>
+      <button id="mgeofence" onclick="mode('geofence')">GEOFENCE</button>
+      <button id="moff" onclick="mode('off')">TRAVEL / OFF</button>
+      <button onclick="ping()">PING TRACKER</button>
+      <button class="danger" onclick="clearAlarm()">CLEAR ALARM</button>
+    </div>
+    <div id="map"></div>
+    <div class="stats">
+      <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div>
+      <div class="stat"><div class="label">Speed</div><div class="value" id="speed">—</div></div>
+      <div class="stat"><div class="label">Battery</div><div class="value" id="battery">—</div></div>
+      <div class="stat"><div class="label">External power</div><div class="value" id="power">—</div></div>
+      <div class="stat"><div class="label">LTE</div><div class="value" id="lte">—</div></div>
+      <div class="stat"><div class="label">GPS</div><div class="value" id="gps">—</div></div>
+      <div class="stat"><div class="label">Telegram</div><div class="value" id="telegram">—</div></div>
+      <div class="stat"><div class="label">Mode</div><div class="value" id="mode">—</div></div>
+      <div class="stat"><div class="label">Geofence</div><div class="value" id="geo">—</div></div>
+      <div class="stat"><div class="label">IMU</div><div class="value" id="imu">—</div></div>
+      <div class="stat"><div class="label">Alarm</div><div class="value" id="alarm">—</div></div>
+      <div class="stat"><div class="label">Last alert</div><div class="value" id="lastalert">—</div></div>
+    </div>
+  </div>
+</div>
+
+<div>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:end;gap:10px;flex-wrap:wrap">
+      <div><div style="font-size:22px;font-weight:900">History</div><div id="dbstate" class="small">Checking history database…</div></div>
+      <div class="filters">
+        <button id="f24" onclick="setHours(24)">24 HOURS</button>
+        <button id="f168" class="active" onclick="setHours(168)">7 DAYS</button>
+        <button id="f720" onclick="setHours(720)">30 DAYS</button>
+        <button id="f0" onclick="setHours(0)">ALL</button>
+      </div>
+    </div>
+    <div class="history">
+      <div class="row head"><div>TIME</div><div>TYPE</div><div>EVENT</div><div>SPEED</div><div>BATTERY</div></div>
+      <div id="historyrows"></div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);let latest=null,hours=168,map=null,marker=null,path=null;
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000);return s<60?Math.floor(s)+' sec ago':s<3600?Math.floor(s/60)+' min ago':s<86400?Math.floor(s/3600)+' hr ago':Math.floor(s/86400)+' day ago'}
+function modeLabel(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
+async function api(p,o={}){const r=await fetch(p,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o});if(!r.ok)throw Error(await r.text());return r.json()}
+function initMap(){if(!window.L)return;map=L.map('map').setView([36.85,-76.1],10);L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(map);path=L.polyline([],{weight:4}).addTo(map)}
+initMap();
+function renderLive(s){latest=s;$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===true?'Locked':s.gps_fix===false?'No fix':'—';$('telegram').textContent=s.telegram_configured?'READY':'—';$('mode').textContent=modeLabel(s.mode);$('geo').textContent=(s.geofence_ft||'—')+' ft';$('imu').textContent=(s.imu_sensitivity||'—').toUpperCase();$('alarm').textContent=s.alarm?(s.alarm_reason||'ACTIVE'):'Clear';$('lastalert').textContent=age(s.last_alert_at);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
+['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
+if(map&&typeof s.lat==='number'){if(!marker)marker=L.marker([s.lat,s.lon]).addTo(map);else marker.setLatLng([s.lat,s.lon]);map.setView([s.lat,s.lon],15)}}
+function renderHistory(d){$('dbstate').textContent=d.persistent?'Persistent history connected • '+d.count+' records shown':(d.error||'History database not connected');$('dbstate').className='small '+(d.persistent?'dbgood':'dbbad');const items=d.items||[];$('historyrows').innerHTML=items.map(x=>'<div class="row" data-lat="'+(x.lat??'')+'" data-lon="'+(x.lon??'')+'"><div>'+esc(new Date(x.event_time||x.created_at).toLocaleString())+'</div><div class="muted">'+esc((x.category||'').toUpperCase())+'</div><div><div class="title">'+esc(x.title)+'</div><div class="muted">'+esc(x.detail||'')+'</div></div><div>'+((x.speed_mph==null)?'—':Math.round(x.speed_mph)+' mph')+'</div><div>'+((x.battery_percent==null)?'—':x.battery_percent+'%')+'</div></div>').join('')||'<div class="small" style="padding:16px">No history yet.</div>';
+const pts=items.filter(x=>typeof x.lat==='number'&&typeof x.lon==='number').reverse().map(x=>[x.lat,x.lon]);if(path&&pts.length){path.setLatLngs(pts);if(pts.length>1)map.fitBounds(path.getBounds(),{padding:[20,20]})}}
+async function refresh(){try{renderLive(await api('/api/trailer/status'));const h=await api('/api/homebase/history?hours='+hours+'&limit=5000');renderHistory(h)}catch(e){$('conn').textContent='Offline'}}
+function setHours(h){hours=h;[24,168,720,0].forEach(x=>$('f'+x).classList.toggle('active',x===h));refresh()}
+async function mode(x){try{renderLive(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));setTimeout(refresh,1000)}catch(e){alert(e.message)}}
+async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
+async function clearAlarm(){try{renderLive(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));setTimeout(refresh,500)}catch(e){alert(e.message)}}
+refresh();setInterval(refresh,10000);
+</script>
+</body></html>
