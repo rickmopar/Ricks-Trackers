@@ -28,16 +28,16 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="stat"><div class="label">Telegram alerts</div><div class="value" id="sms">—</div></div><div class="stat"><div class="label">Last alert</div><div class="value" id="lastsms">—</div></div>
 <div class="stat full"><div class="label">Current mode</div><div class="value" id="mode">—</div></div></div></div>
 <div class="card"><b>Geofence radius</b><div class="geos"><button id="g100" onclick="geo(100)">100 ft</button><button id="g500" onclick="geo(500)">500 ft</button><button id="g1000" onclick="geo(1000)">1000 ft</button></div></div>
-<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button onclick="setHome()">SET HOME HERE</button><button onclick="clearAlarm()">CLEAR ALARM</button><button type="button" class="test" id="pingBtn">PING TRACKER</button><button type="button" class="test" id="testSmsBtn">TEST TELEGRAM ALERT</button></div></div>
+<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button onclick="setHome()">SET HOME HERE</button><button onclick="clearAlarm()">CLEAR ALARM</button><button type="button" class="test" id="pingBtn">PING TRACKER</button><button type="button" class="test" id="trackBtn">TRACK THE TRACKER</button><button type="button" class="test" id="testSmsBtn">TEST TELEGRAM ALERT</button></div></div>
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
-const $=id=>document.getElementById(id);let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
+const $=id=>document.getElementById(id);let latestState=null;let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(map);
 function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000);return s<60?Math.floor(s)+' sec ago':s<3600?Math.floor(s/60)+' min ago':s<86400?Math.floor(s/3600)+' hr ago':Math.floor(s/86400)+' day ago'}
 function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
 async function api(p,o={}){let r=await fetch(p,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o});if(!r.ok)throw Error((await r.text())||r.status);return r.json()}
-function render(s){$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
+function render(s){latestState=s;$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
 if(typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
@@ -85,6 +85,15 @@ async function pingTracker(){
     setTimeout(()=>{b.disabled=false;b.textContent=old},4000);
   }
 }
+function trackTracker(){
+  if(!latestState || typeof latestState.lat!=='number' || typeof latestState.lon!=='number'){
+    msg('No tracker GPS location available yet. Press PING TRACKER first.','red');
+    return;
+  }
+  const dest=latestState.lat.toFixed(6)+','+latestState.lon.toFixed(6);
+  const url='https://www.google.com/maps/dir/?api=1&destination='+encodeURIComponent(dest)+'&travelmode=driving&dir_action=navigate';
+  window.open(url,'_blank');
+}
 async function testSms(){
   const b=$('testSmsBtn');
   if(!b)return;
@@ -106,6 +115,8 @@ async function testSms(){
 }
 const pingButton=$('pingBtn');
 if(pingButton)pingButton.addEventListener('click',pingTracker);
+const trackButton=$('trackBtn');
+if(trackButton)trackButton.addEventListener('click',trackTracker);
 const testButton=$('testSmsBtn');
 if(testButton)testButton.addEventListener('click',testSms);
 refresh();setInterval(refresh,10000);
