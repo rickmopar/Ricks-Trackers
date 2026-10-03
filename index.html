@@ -36,27 +36,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,att
 function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000);return s<60?Math.floor(s)+' sec ago':s<3600?Math.floor(s/60)+' min ago':s<86400?Math.floor(s/3600)+' hr ago':Math.floor(s/86400)+' day ago'}
 function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
-function accessKey(){
-  const urlKey=new URLSearchParams(location.search).get('key');
-  if(urlKey){
-    localStorage.setItem('ricksTrackerKey',urlKey.trim());
-    history.replaceState({},'',location.pathname+'?v=6');
-    return urlKey.trim();
-  }
-  let k=localStorage.getItem('ricksTrackerKey');
-  if(!k){
-    k=prompt("Enter Rick's Trackers access code");
-    if(k)localStorage.setItem('ricksTrackerKey',k.trim());
-  }
-  return (k||'').trim();
-}
-async function api(p,o={}){
-  const headers={'Content-Type':'application/json','X-Tracker-Key':accessKey(),...(o.headers||{})};
-  let r=await fetch(p,{...o,headers});
-  if(r.status===401){localStorage.removeItem('ricksTrackerKey');throw Error('Access code rejected. Reload and enter the correct code.')}
-  if(!r.ok)throw Error((await r.text())||r.status);
-  return r.json()
-}
+async function api(p,o={}){let r=await fetch(p,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o});if(!r.ok)throw Error((await r.text())||r.status);return r.json()}
 function render(s){$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
