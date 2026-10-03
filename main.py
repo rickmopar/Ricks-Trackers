@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -80,6 +80,27 @@ def refresh_vitals(force=False):
 def note(t,d):
     state["events"].insert(0,{"title":t,"detail":d,"time":datetime.now(timezone.utc).isoformat()})
     state["events"]=state["events"][:50]
+def timeline(stage,detail="",when=None,kind="info"):
+    ts=when or datetime.now(timezone.utc).isoformat()
+    state["timeline"].insert(0,{"stage":stage,"detail":detail,"time":ts,"kind":kind})
+    state["timeline"]=state["timeline"][:100]
+
+def iso_from_event_time(v):
+    if v is None:return None
+    try:
+        if isinstance(v,(int,float)) or str(v).replace(".","",1).isdigit():
+            return datetime.fromtimestamp(float(v),timezone.utc).isoformat()
+        return str(v)
+    except Exception:
+        return None
+
+def seconds_between(a,b):
+    try:
+        aa=datetime.fromisoformat(str(a).replace("Z","+00:00"))
+        bb=datetime.fromisoformat(str(b).replace("Z","+00:00"))
+        return max(0,(bb-aa).total_seconds())
+    except Exception:
+        return None
 def telegram_ready():
     state["telegram_configured"]=bool(TELEGRAM_BOT_TOKEN and state.get("telegram_chat_id"))
     return state["telegram_configured"]
@@ -113,7 +134,15 @@ def send_alert(body,key,force=False):
     if not r.ok:
         raise HTTPException(502,f"Telegram error: {r.text[:180]}")
     state["_key"],state["_epoch"]=key,now
-    state["last_alert_at"]=datetime.now(timezone.utc).isoformat()
+    sent_at=datetime.now(timezone.utc).isoformat()
+    state["last_alert_at"]=sent_at
+    detail="Telegram accepted alert"
+    if key.startswith("movement"):
+        origin=state.get("_last_motion_device_time") or state.get("_last_motion_published_at") or state.get("_last_motion_webhook_at")
+        delay=seconds_between(origin,sent_at) if origin else None
+        if delay is not None:
+            detail=f"Telegram accepted alert • {delay:.1f}s from device motion event"
+    timeline("TELEGRAM SENT",detail,sent_at,"alert")
     note("Telegram alert sent",body[:120]);return True
 
 def miles(a,b,c,d):
@@ -122,7 +151,9 @@ def miles(a,b,c,d):
     return r*2*math.atan2(math.sqrt(x),math.sqrt(1-x))
 def alarm(reason,key):
     if state["mode"]=="off":return
-    state["alarm"]=True;state["alarm_reason"]=reason;note("ALARM",reason)
+    state["alarm"]=True;state["alarm_reason"]=reason
+    timeline("ALARM TRIGGERED",reason,kind="alert")
+    note("ALARM",reason)
     gps="GPS unavailable" if state["lat"] is None else f'{state["lat"]:.6f}, {state["lon"]:.6f}'
     map_link="" if state["lat"] is None else f"\nMap: https://maps.google.com/?q={state['lat']:.6f},{state['lon']:.6f}"
     send_alert(f"🚨 TRAILER ALERT\n{reason}\nMode: {state['mode'].upper()}\nSpeed: {state['speed_mph']:.0f} mph\nGPS: {gps}{map_link}\nOpen Rick's Trackers for live location.",key)
@@ -295,6 +326,7 @@ def clear():
 @app.post("/api/particle/webhook")
 async def webhook(request:Request,authorization:Optional[str]=Header(default=None)):
     auth_webhook(authorization)
+    webhook_received_at=datetime.now(timezone.utc).isoformat()
     raw=await request.json()
 
     # Particle webhooks wrap the device event in "data"; Tracker firmware versions
@@ -364,14 +396,10 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         )
         print(f"Particle loc triggers={triggers} imu_motion={imu_motion} mode={state['mode']}")
 
-        timestamp=raw.get("published_at") if isinstance(raw,dict) else None
+        published_at=raw.get("published_at") if isinstance(raw,dict) else None
         event_time=container.get("time",container.get("timestamp"))
-        if not timestamp and event_time:
-            try:
-                if isinstance(event_time,(int,float)) or str(event_time).replace(".","",1).isdigit():
-                    timestamp=datetime.fromtimestamp(float(event_time),timezone.utc).isoformat()
-                else: timestamp=str(event_time)
-            except Exception: timestamp=None
+        device_event_time=iso_from_event_time(event_time)
+        timestamp=published_at or device_event_time
 
         lock=loc.get("lck",loc.get("lock",loc.get("fix",True)))
         x=Event(
@@ -383,6 +411,19 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             motion=imu_motion,
             alarm=False,alarm_reason=None,timestamp=timestamp
         )
+        if imu_motion:
+            state["_last_motion_device_time"]=device_event_time
+            state["_last_motion_published_at"]=published_at
+            state["_last_motion_webhook_at"]=webhook_received_at
+            if device_event_time:
+                timeline("DEVICE MOTION EVENT","Tracker reported IMU motion trigger: "+", ".join(triggers),device_event_time,"motion")
+            if published_at:
+                d=seconds_between(device_event_time,published_at) if device_event_time else None
+                extra="" if d is None else f" • {d:.1f}s after device event"
+                timeline("PARTICLE CLOUD","Motion/location event published"+extra,published_at,"cloud")
+            d=seconds_between(published_at or device_event_time,webhook_received_at)
+            extra="" if d is None else f" • {d:.1f}s after Particle publish"
+            timeline("WEBHOOK RECEIVED","Rick's Trackers received Particle event"+extra,webhook_received_at,"server")
     else:
         # Keep custom/test payload support, but don't make Particle disable/retry a
         # valid webhook just because a non-location event has a different schema.
