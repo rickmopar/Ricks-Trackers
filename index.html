@@ -13,14 +13,14 @@
 .pill{padding:7px 11px;border-radius:999px;font-size:12px;font-weight:900}.secure{background:#143725;color:#8df0b8}.alarm{background:#4a1d25;color:#ffb1bb}.off{background:#3a2d17;color:#ffd789}
 .modegrid,.geos,.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}.actions{grid-template-columns:1fr 1fr}
 button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:14px;padding:13px 7px;font-weight:900}.mode.active{outline:2px solid var(--blue)}.test{grid-column:1/-1;background:#1f5f91}
-#map{height:300px;border-radius:17px;overflow:hidden;margin-top:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}.stat{background:#0b1522;border:1px solid var(--line);border-radius:14px;padding:11px}.label{font-size:10px;color:var(--muted);text-transform:uppercase}.value{font-size:17px;font-weight:900;margin-top:5px}.full{grid-column:1/-1}
+#mapwrap{position:relative;margin-top:12px}#map{height:300px;border-radius:17px;overflow:hidden}.mapbtn{position:absolute;right:10px;bottom:10px;z-index:1000;background:#162338;border:1px solid #4d9cff;color:#fff;border-radius:12px;padding:10px 12px;font-weight:900;box-shadow:0 2px 8px rgba(0,0,0,.35)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}.stat{background:#0b1522;border:1px solid var(--line);border-radius:14px;padding:11px}.label{font-size:10px;color:var(--muted);text-transform:uppercase}.value{font-size:17px;font-weight:900;margin-top:5px}.full{grid-column:1/-1}
 .banner{display:none;margin-top:12px;padding:12px;border-radius:13px;font-weight:800}.banner.show{display:block}.green{background:#153827}.red{background:#481d25}.amber{background:#3a2d17}
 .event{padding:9px 0;border-bottom:1px solid #1f2e42}.et{font-weight:850;font-size:13px}.ed{font-size:12px;color:var(--muted);margin-top:2px}
 </style></head><body><div class="app">
 <div class="top"><div><div class="brand">Rick's Trackers</div><div class="small">Car Trailer</div></div><div class="small" id="conn">Connecting…</div></div>
 <div class="card"><div class="head"><div><div class="asset">Car Trailer</div><div class="small" id="sub">Waiting for tracker data</div></div><div class="pill off" id="pill">WAITING</div></div>
 <div class="modegrid"><button class="mode" id="marmed" onclick="mode('armed')">ARMED</button><button class="mode" id="mgeofence" onclick="mode('geofence')">GEOFENCE</button><button class="mode" id="moff" onclick="mode('off')">TRAVEL / OFF</button></div>
-<div class="banner" id="banner"></div><div id="map"></div>
+<div class="banner" id="banner"></div><div id="mapwrap"><div id="map"></div><button type="button" class="mapbtn" onclick="centerMap()">CENTER MAP</button></div>
 <div class="grid">
 <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div><div class="stat"><div class="label">Speed</div><div class="value" id="speed">—</div></div>
 <div class="stat"><div class="label">Battery</div><div class="value" id="battery">—</div></div><div class="stat"><div class="label">External power</div><div class="value" id="power">—</div></div>
@@ -43,6 +43,15 @@ let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.cl
 if(typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
 $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.'}
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function centerMap(){
+  const ll=marker.getLatLng();
+  const oneMileLat=1/69.0;
+  const bounds=L.latLngBounds(
+    [ll.lat-oneMileLat,ll.lng],
+    [ll.lat+oneMileLat,ll.lng]
+  );
+  map.fitBounds(bounds,{padding:[20,20]});
+}
 async function refresh(){try{render(await api('/api/trailer/status'))}catch(e){$('conn').textContent='Offline';$('sub').textContent=e.message}}
 async function mode(x){try{render(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));msg('Mode changed to '+label(x))}catch(e){msg(e.message,'red')}}
 async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST',body:JSON.stringify({feet:x})}));msg('Geofence set to '+x+' ft')}catch(e){msg(e.message,'red')}}
