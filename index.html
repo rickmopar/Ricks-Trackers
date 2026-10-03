@@ -56,14 +56,26 @@ function centerMap(){
 async function refresh(){try{render(await api('/api/trailer/status'))}catch(e){$('conn').textContent='Offline';$('sub').textContent=e.message}}
 async function mode(x){try{render(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));msg('Mode changed to '+label(x))}catch(e){msg(e.message,'red')}}
 async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST',body:JSON.stringify({feet:x})}));msg('Geofence set to '+x+' ft')}catch(e){msg(e.message,'red')}}
+let imuBusy=false;
 async function imu(x){
+  if(imuBusy)return;
+  imuBusy=true;
+  const ids=['low','medium','high'];
+  ids.forEach(v=>{const b=$('i'+v); if(b){b.disabled=true;b.classList.toggle('active',v===x)}});
+  if(latestState){latestState.imu_sensitivity=x;render(latestState)}
   try{
     msg('Setting motion sensitivity to '+x.toUpperCase()+'…','amber');
     const r=await api('/api/trailer/imu-sensitivity',{method:'POST',body:JSON.stringify({sensitivity:x})});
-    if(latestState){latestState.imu_sensitivity=r.imu_sensitivity;render(latestState)}
+    if(latestState){latestState.imu_sensitivity=r.imu_sensitivity;latestState.imu_pending=r.imu_pending;render(latestState)}
     msg('Motion sensitivity set to '+r.imu_sensitivity.toUpperCase(),'green');
-    setTimeout(refresh,500);
-  }catch(e){msg('Motion sensitivity failed: '+e.message,'red')}
+    setTimeout(refresh,800);
+  }catch(e){
+    msg('Motion sensitivity failed: '+e.message,'red');
+    setTimeout(refresh,300);
+  }finally{
+    ids.forEach(v=>{const b=$('i'+v); if(b)b.disabled=false});
+    imuBusy=false;
+  }
 }
 async function live(x){try{render(await api('/api/trailer/live',{method:'POST',body:JSON.stringify({enabled:x})}));msg(x?'Live tracking requested':'Normal updates restored')}catch(e){msg(e.message,'red')}}
 async function setHome(){try{render(await api('/api/trailer/set-home',{method:'POST',body:'{}'}));msg('Home position set to the current tracker location')}catch(e){msg(e.message,'red')}}
