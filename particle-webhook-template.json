@@ -1,0 +1,16 @@
+{
+  "event": "loc",
+  "url": "https://ricks-trackers.onrender.com/api/particle/webhook",
+  "requestType": "POST",
+  "json": {
+    "event": "{{{PARTICLE_EVENT_NAME}}}",
+    "data": "{{{PARTICLE_EVENT_VALUE}}}",
+    "coreid": "{{{PARTICLE_DEVICE_ID}}}",
+    "published_at": "{{{PARTICLE_PUBLISHED_AT}}}"
+  },
+  "headers": {
+    "Authorization": "Bearer ${PARTICLE_WEBHOOK_TOKEN}"
+  },
+  "noDefaults": true,
+  "rejectUnauthorized": true
+}
