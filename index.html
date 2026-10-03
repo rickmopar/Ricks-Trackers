@@ -37,9 +37,18 @@ function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000
 function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
 function accessKey(){
+  const urlKey=new URLSearchParams(location.search).get('key');
+  if(urlKey){
+    localStorage.setItem('ricksTrackerKey',urlKey.trim());
+    history.replaceState({},'',location.pathname+'?v=6');
+    return urlKey.trim();
+  }
   let k=localStorage.getItem('ricksTrackerKey');
-  if(!k){k=prompt("Enter Rick's Trackers access code");if(k)localStorage.setItem('ricksTrackerKey',k.trim())}
-  return k||'';
+  if(!k){
+    k=prompt("Enter Rick's Trackers access code");
+    if(k)localStorage.setItem('ricksTrackerKey',k.trim());
+  }
+  return (k||'').trim();
 }
 async function api(p,o={}){
   const headers={'Content-Type':'application/json','X-Tracker-Key':accessKey(),...(o.headers||{})};
