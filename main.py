@@ -360,5 +360,15 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
 def startup_discover():
     try: discover_telegram_chat()
     except Exception as e: print(f"Telegram startup discovery skipped: {e}")
+    try:
+        if PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID:
+            r=requests.get(
+                f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}",
+                headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"},
+                timeout=15
+            )
+            print(f"Particle IMU config probe status={r.status_code} body={r.text[:1200]}")
+    except Exception as e:
+        print(f"Particle IMU config probe exception: {e}")
 
 app.mount("/",StaticFiles(directory=".",html=True),name="static")
