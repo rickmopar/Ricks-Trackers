@@ -1,7 +1,7 @@
 import os, math, time, hmac, requests
 from datetime import datetime, timezone
 from typing import Literal, Optional
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -113,26 +113,85 @@ def clear():
     note("Alarm cleared","Returned to monitoring")
     return pub()
 @app.post("/api/particle/webhook")
-def webhook(x:Event,authorization:Optional[str]=Header(default=None)):
-    auth_webhook(authorization);prev=state["external_power"]
-    for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:state[k]=getattr(x,k)
+async def webhook(request:Request,authorization:Optional[str]=Header(default=None)):
+    auth_webhook(authorization)
+    raw=await request.json()
+
+    # Particle webhooks normally wrap the actual event JSON in the "data" field.
+    payload=raw
+    if isinstance(raw,dict) and "data" in raw:
+        data=raw.get("data")
+        if isinstance(data,str):
+            try: payload=requests.models.complexjson.loads(data)
+            except Exception: payload={"raw":data}
+        elif isinstance(data,dict):
+            payload=data
+
+    # Native Tracker One / Tracker Edge loc and loc-enhanced event.
+    if isinstance(payload,dict) and isinstance(payload.get("loc"),dict):
+        loc=payload["loc"]
+        if "lat" not in loc or "lon" not in loc:
+            return {"ok":True,"ignored":"no valid location yet"}
+        lat=float(loc["lat"]); lon=float(loc["lon"])
+        spd=loc.get("spd",loc.get("speed",0)) or 0
+        speed_mph=float(spd)*2.2369362920544
+        batt=loc.get("batt")
+        cell=loc.get("cell")
+        triggers=[str(t) for t in (payload.get("trig") or [])]
+        timestamp=raw.get("published_at") if isinstance(raw,dict) else None
+        if not timestamp and payload.get("time"):
+            try: timestamp=datetime.fromtimestamp(float(payload["time"]),timezone.utc).isoformat()
+            except Exception: timestamp=None
+        x=Event(
+            lat=lat,lon=lon,speed_mph=speed_mph,
+            battery_percent=None if batt is None else int(round(float(batt))),
+            external_power=None,
+            lte=None if cell is None else f"{float(cell):.0f}%",
+            gps_fix=bool(loc.get("lck",1)),
+            motion=("imu_m" in triggers or "radius" in triggers),
+            alarm=False,
+            alarm_reason=None,
+            timestamp=timestamp
+        )
+    else:
+        # Also accept our direct/custom event format.
+        try: x=Event(**payload)
+        except Exception as e: raise HTTPException(422,f"Unsupported Particle payload: {e}")
+
+    prev=state["external_power"]
+    for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:
+        v=getattr(x,k)
+        if v is not None: state[k]=v
     state["last_seen"]=x.timestamp or datetime.now(timezone.utc).isoformat()
     state["route"].append({"lat":x.lat,"lon":x.lon});state["route"]=state["route"][-200:]
-    if state["home_lat"] is None:state["home_lat"],state["home_lon"]=x.lat,x.lon;note("Home position set","First valid tracker position")
-    if x.alarm:alarm(x.alarm_reason or "Tracker alarm","device-alarm")
+    if state["home_lat"] is None:
+        state["home_lat"],state["home_lon"]=x.lat,x.lon
+        note("Home position set","First valid tracker position")
+
+    if x.alarm: alarm(x.alarm_reason or "Tracker alarm","device-alarm")
+
+    # Native Tracker motion trigger. This is immediate on a Particle IMU movement publish.
+    if state["mode"]=="armed" and x.motion:
+        alarm("Movement detected by Tracker One","movement")
+
+    # Speed-based fallback if multiple frequent points show sustained movement.
     if state["mode"]=="armed":
-        moving=bool(x.motion or x.speed_mph>=1.0)
+        moving=bool(x.speed_mph>=1.0)
         if moving:
             if state["_motion_started"] is None: state["_motion_started"]=time.time()
-            elif time.time()-state["_motion_started"]>=10: alarm("Movement detected for 10 seconds","movement")
+            elif time.time()-state["_motion_started"]>=10: alarm("Movement detected for 10 seconds","movement-10s")
         else:
             state["_motion_started"]=None
     else:
         state["_motion_started"]=None
+
     if state["mode"] in ("armed","geofence") and state["home_lat"] is not None:
-        if miles(state["home_lat"],state["home_lon"],x.lat,x.lon)*5280>state["geofence_ft"]:alarm(f"Trailer left the {state['geofence_ft']} ft geofence",f"geo-{state['geofence_ft']}")
-    if prev is True and x.external_power is False and state["mode"]!="off":alarm("External tracker power disconnected","power-loss")
-    return {"ok":True}
+        if miles(state["home_lat"],state["home_lon"],x.lat,x.lon)*5280>state["geofence_ft"]:
+            alarm(f"Trailer left the {state['geofence_ft']} ft geofence",f"geo-{state['geofence_ft']}")
+
+    if prev is True and x.external_power is False and state["mode"]!="off":
+        alarm("External tracker power disconnected","power-loss")
+    return {"ok":True,"lat":x.lat,"lon":x.lon,"speed_mph":round(x.speed_mph,1)}
 @app.on_event("startup")
 def startup_discover():
     try: discover_telegram_chat()
