@@ -9,7 +9,8 @@ app=FastAPI(title="Rick's Trackers")
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
 TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
-state={"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0}
+DASHBOARD_KEY=os.getenv("DASHBOARD_KEY","")
+state={"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -39,7 +40,7 @@ def discover_telegram_chat():
         msg=upd.get("message") or upd.get("channel_post") or upd.get("edited_message")
         if msg and msg.get("chat",{}).get("id"):
             state["telegram_chat_id"]=str(msg["chat"]["id"])
-            print("Telegram chat discovered")
+            print(f"Telegram chat discovered: {state['telegram_chat_id']}")
             break
     telegram_ready()
     return state.get("telegram_chat_id")
@@ -67,10 +68,15 @@ def alarm(reason,key):
     if state["mode"]=="off":return
     state["alarm"]=True;state["alarm_reason"]=reason;note("ALARM",reason)
     gps="GPS unavailable" if state["lat"] is None else f'{state["lat"]:.6f}, {state["lon"]:.6f}'
-    send_alert(f"🚨 TRAILER ALERT\n{reason}\nMode: {state['mode'].upper()}\nSpeed: {state['speed_mph']:.0f} mph\nGPS: {gps}\nOpen Rick's Trackers for live location.",key)
+    map_link="" if state["lat"] is None else f"\nMap: https://maps.google.com/?q={state['lat']:.6f},{state['lon']:.6f}"
+    send_alert(f"🚨 TRAILER ALERT\n{reason}\nMode: {state['mode'].upper()}\nSpeed: {state['speed_mph']:.0f} mph\nGPS: {gps}{map_link}\nOpen Rick's Trackers for live location.",key)
 def auth_webhook(h):
     if not TOKEN:raise HTTPException(503,"Particle webhook token is not configured")
     if not h or not hmac.compare_digest(h,f"Bearer {TOKEN}"):raise HTTPException(401,"Invalid webhook authorization")
+
+def auth_dashboard(x_tracker_key:Optional[str]=Header(default=None)):
+    if not DASHBOARD_KEY: raise HTTPException(503,"Dashboard access key is not configured")
+    if not x_tracker_key or not hmac.compare_digest(x_tracker_key,DASHBOARD_KEY): raise HTTPException(401,"Dashboard access denied")
 
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
