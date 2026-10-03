@@ -9,7 +9,6 @@ app=FastAPI(title="Rick's Trackers")
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
 TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
-DASHBOARD_KEY=os.getenv("DASHBOARD_KEY","")
 state={"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
@@ -74,50 +73,42 @@ def auth_webhook(h):
     if not TOKEN:raise HTTPException(503,"Particle webhook token is not configured")
     if not h or not hmac.compare_digest(h,f"Bearer {TOKEN}"):raise HTTPException(401,"Invalid webhook authorization")
 
-def auth_dashboard(x_tracker_key:Optional[str]=Header(default=None)):
-    if not DASHBOARD_KEY: raise HTTPException(503,"Dashboard access key is not configured")
-    if not x_tracker_key or not hmac.compare_digest(x_tracker_key,DASHBOARD_KEY): raise HTTPException(401,"Dashboard access denied")
 
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
 @app.get("/api/trailer/status")
-def status(x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key); telegram_ready(); return pub()
+def status(): telegram_ready(); return pub()
 @app.post("/api/trailer/mode")
-def setmode(x:Mode,x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key)
+def setmode(x:Mode):
     state["mode"]=x.mode
     if x.mode=="off":state["alarm"]=False;state["alarm_reason"]=None
     note("Mode changed",x.mode);return pub()
 @app.post("/api/trailer/geofence")
-def setgeo(x:Fence,x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key); state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
+def setgeo(x:Fence):
+    state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
 @app.post("/api/trailer/live")
-def setlive(x:Live,x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key); state["live"]=x.enabled; note("Live tracking request","Frequent updates requested" if x.enabled else "Normal updates requested"); return pub()
+def setlive(x:Live):
+    state["live"]=x.enabled; note("Live tracking request","Frequent updates requested" if x.enabled else "Normal updates requested"); return pub()
 @app.post("/api/trailer/test-alert")
-def testalert(x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key)
+def testalert():
     if not TELEGRAM_BOT_TOKEN:raise HTTPException(503,"Telegram bot is not configured on the server")
     if not discover_telegram_chat():raise HTTPException(503,"Open your Telegram bot and send a message, then try again")
     send_alert("✅ RICK'S TRACKERS TEST\nTelegram alerts are working.",f"test-{time.time()}",True)
     return {"ok":True,"channel":"telegram"}
 
 @app.post("/api/trailer/test-sms")
-def testsms_compat(x_tracker_key:Optional[str]=Header(default=None)):
-    return testalert(x_tracker_key)
+def testsms_compat():
+    return testalert()
 
 @app.post("/api/trailer/set-home")
-def sethome(x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key)
+def sethome():
     if state["lat"] is None or state["lon"] is None: raise HTTPException(409,"No live tracker position yet")
     state["home_lat"],state["home_lon"]=state["lat"],state["lon"]
     note("Home position set","Current tracker position")
     return pub()
 
 @app.post("/api/trailer/clear-alarm")
-def clear(x_tracker_key:Optional[str]=Header(default=None)):
-    auth_dashboard(x_tracker_key)
+def clear():
     state["alarm"]=False;state["alarm_reason"]=None
     note("Alarm cleared","Returned to monitoring")
     return pub()
