@@ -11,11 +11,12 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
 class Live(BaseModel): enabled:bool
+class ImuSensitivity(BaseModel): sensitivity:Literal["low","medium","high"]
 class Event(BaseModel):
     lat:float; lon:float; speed_mph:float=0; battery_percent:Optional[int]=None
     external_power:Optional[bool]=None; lte:Optional[str]=None; gps_fix:bool=True
@@ -147,73 +148,70 @@ def ensure_development_device():
     print(f"Particle development-device status={r.status_code} development={doc.get('development')}")
     return bool(doc.get("development") is True or str(doc.get("development")).lower()=="true")
 
-def ensure_imu_motion():
+def get_particle_config():
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
-        print("Particle IMU setup skipped: control not configured")
-        return False
+        raise HTTPException(503,"Particle control is not configured")
     url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
     headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"}
     r=requests.get(url,headers=headers,timeout=15)
     if not r.ok:
-        print(f"Particle IMU GET failed status={r.status_code} body={r.text[:300]}")
-        return False
-    doc=r.json()
-    current=((doc.get("configuration") or {}).get("current") or {})
-    if not isinstance(current,dict):
-        print("Particle IMU setup failed: current config missing")
-        return False
-    imu=current.get("imu_trig") if isinstance(current.get("imu_trig"),dict) else {}
-    if imu.get("motion")=="medium":
-        print("Particle IMU motion already medium")
-        return True
+        raise HTTPException(r.status_code,f"Particle config lookup failed: {r.text[:220]}")
+    return r.json()
 
+def read_imu_motion():
+    doc=get_particle_config()
+    conf=doc.get("configuration") or {}
+    current=conf.get("current") or {}
+    pending=conf.get("pending") or {}
+    motion=((pending.get("imu_trig") or {}).get("motion")
+            or (current.get("imu_trig") or {}).get("motion"))
+    if motion in ("low","medium","high","disable"):
+        state["imu_sensitivity"]=motion
+    return motion
+
+def set_imu_motion(sensitivity):
+    doc=get_particle_config()
+    conf=doc.get("configuration") or {}
+    current=conf.get("current") or {}
+    if not isinstance(current,dict) or not current:
+        raise HTTPException(502,"Particle current configuration is missing")
     updated=requests.models.complexjson.loads(requests.models.complexjson.dumps(current))
-    updated.setdefault("imu_trig",{})["motion"]="medium"
-    p=requests.put(
-        url,
-        headers={**headers,"Content-Type":"application/json"},
-        json=updated,
-        timeout=20
-    )
-    if not p.ok:
-        print(f"Particle IMU PUT failed status={p.status_code} body={p.text[:500]}")
-        return False
-    print(f"Particle IMU PUT accepted status={p.status_code}")
-
-    time.sleep(2)
-    v=requests.get(url,headers=headers,timeout=15)
-    if not v.ok:
-        print(f"Particle IMU verify GET failed status={v.status_code} body={v.text[:300]}")
-        return False
-    vdoc=v.json()
-    conf=vdoc.get("configuration") or {}
-    cur=((conf.get("current") or {}).get("imu_trig") or {}).get("motion")
-    pend=((conf.get("pending") or {}).get("imu_trig") or {}).get("motion")
-    ok=(cur=="medium" or pend=="medium")
-    print(f"Particle IMU verify current={cur} pending={pend} ok={ok}")
-    return ok
+    updated.setdefault("imu_trig",{})["motion"]=sensitivity
+    url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
+    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json","Content-Type":"application/json"}
+    r=requests.put(url,headers=headers,json=updated,timeout=20)
+    if not r.ok:
+        raise HTTPException(r.status_code,f"Particle IMU update failed: {r.text[:260]}")
+    time.sleep(1)
+    actual=read_imu_motion()
+    if actual != sensitivity:
+        raise HTTPException(502,f"Particle has not applied {sensitivity} sensitivity yet")
+    state["imu_sensitivity"]=actual
+    note("Motion sensitivity changed",actual.upper())
+    return actual
 
 @app.get("/api/trailer/imu-config")
 def imu_config():
-    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
-        raise HTTPException(503,"Particle control is not configured")
-    r=requests.get(
-        f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}",
-        headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"},
-        timeout=15
-    )
-    if not r.ok:
-        raise HTTPException(r.status_code,f"Particle config lookup failed: {r.text[:220]}")
-    cfg=r.json()
-    return {
-        "imu_trig":cfg.get("imu_trig"),
-        "location":cfg.get("location"),
-        "geofence":cfg.get("geofence")
-    }
+    doc=get_particle_config()
+    conf=doc.get("configuration") or {}
+    current=conf.get("current") or {}
+    pending=conf.get("pending") or {}
+    motion=((pending.get("imu_trig") or {}).get("motion")
+            or (current.get("imu_trig") or {}).get("motion"))
+    state["imu_sensitivity"]=motion
+    return {"motion":motion,"current":current.get("imu_trig"),"pending":pending.get("imu_trig")}
+
+@app.post("/api/trailer/imu-sensitivity")
+def imu_sensitivity(x:ImuSensitivity):
+    actual=set_imu_motion(x.sensitivity)
+    return {"ok":True,"imu_sensitivity":actual}
 @app.get("/api/trailer/status")
 def status():
     telegram_ready()
     refresh_vitals()
+    if state.get("imu_sensitivity") is None:
+        try: read_imu_motion()
+        except Exception as e: print(f"Particle IMU read skipped: {e}")
     return pub()
 @app.post("/api/trailer/mode")
 def setmode(x:Mode):
@@ -425,7 +423,8 @@ def startup_discover():
         print(f"Particle development-device verify ok={dev_ok}")
         if dev_ok:
             time.sleep(1)
-            ensure_imu_motion()
+            motion=read_imu_motion()
+            print(f"Particle IMU motion sensitivity={motion}")
     except Exception as e:
         print(f"Particle IMU setup exception: {e}")
 
