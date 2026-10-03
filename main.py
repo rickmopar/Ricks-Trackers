@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -22,6 +22,60 @@ class Event(BaseModel):
     motion:bool=False; alarm:bool=False; alarm_reason:Optional[str]=None; timestamp:Optional[str]=None
 
 def pub(): return {k:v for k,v in state.items() if not k.startswith("_")}
+
+def refresh_vitals(force=False):
+    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
+        return
+    now=time.time()
+    if not force and now-state.get("_vitals_checked",0)<15:
+        return
+    state["_vitals_checked"]=now
+    try:
+        r=requests.get(
+            f"https://api.particle.io/v1/diagnostics/{PARTICLE_DEVICE_ID}/last",
+            headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"},
+            timeout=12
+        )
+        if not r.ok:
+            print(f"Particle vitals failed status={r.status_code} body={r.text[:240]}")
+            return
+        doc=r.json()
+        diag=doc.get("diagnostics",{}) if isinstance(doc,dict) else {}
+        payload=diag.get("payload",{}) if isinstance(diag,dict) else {}
+        device=payload.get("device",{}) if isinstance(payload,dict) else {}
+        network=device.get("network",{}) if isinstance(device,dict) else {}
+        signal=network.get("signal",{}) if isinstance(network,dict) else {}
+        power=device.get("power",{}) if isinstance(device,dict) else {}
+        battery=power.get("battery",{}) if isinstance(power,dict) else {}
+
+        charge=battery.get("charge") if isinstance(battery,dict) else None
+        if isinstance(charge,(int,float)):
+            state["battery_percent"]=int(round(float(charge)))
+
+        strength=signal.get("strength") if isinstance(signal,dict) else None
+        quality=signal.get("quality") if isinstance(signal,dict) else None
+        rat=signal.get("at") if isinstance(signal,dict) else None
+        if isinstance(strength,(int,float)):
+            state["lte"]=f"{float(strength):.0f}%"
+        if isinstance(quality,(int,float)):
+            state["lte_quality"]=f"{float(quality):.0f}%"
+        if rat:
+            state["network_type"]=str(rat)
+
+        batt_state=str(battery.get("state","")).lower() if isinstance(battery,dict) else ""
+        source=str(power.get("source","")).lower() if isinstance(power,dict) else ""
+        if batt_state in ("charging","charged"):
+            state["external_power"]=True
+        elif batt_state in ("discharging","disconnected"):
+            state["external_power"]=False
+        elif source and source!="unknown":
+            state["external_power"]=True
+
+        updated=diag.get("updated_at") if isinstance(diag,dict) else None
+        if updated:
+            state["vitals_updated_at"]=updated
+    except Exception as e:
+        print(f"Particle vitals exception: {e}")
 def note(t,d):
     state["events"].insert(0,{"title":t,"detail":d,"time":datetime.now(timezone.utc).isoformat()})
     state["events"]=state["events"][:50]
@@ -79,7 +133,10 @@ def auth_webhook(h):
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
 @app.get("/api/trailer/status")
-def status(): telegram_ready(); return pub()
+def status():
+    telegram_ready()
+    refresh_vitals()
+    return pub()
 @app.post("/api/trailer/mode")
 def setmode(x:Mode):
     state["mode"]=x.mode
@@ -117,7 +174,16 @@ def ping_tracker():
     connected=result.get("connected",True)
     if rv not in (0,None):
         raise HTTPException(502,f"Tracker rejected get_loc command (return value {rv})")
-    note("Tracker ping","Fresh location requested from Tracker One")
+    try:
+        requests.post(
+            f"https://api.particle.io/v1/diagnostics/{PARTICLE_DEVICE_ID}/update",
+            headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"},
+            timeout=12
+        )
+    except Exception as e:
+        print(f"Particle vitals refresh request skipped: {e}")
+    state["_vitals_checked"]=0
+    note("Tracker ping","Fresh location and vitals requested from Tracker One")
     return {"ok":True,"online":bool(connected),"requested":True,"return_value":rv}
 
 @app.post("/api/trailer/test-alert")
