@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -204,6 +204,54 @@ def read_imu_motion():
         state["imu_pending"]=None
     return pending_motion or current_motion
 
+def set_tracker_power_profile(mode):
+    """Apply Particle-side power behavior for app modes without changing secrets or firmware."""
+    doc=get_particle_config()
+    conf=doc.get("configuration") or {}
+    current=conf.get("current") or {}
+    if not isinstance(current,dict) or not current:
+        raise HTTPException(502,"Particle current configuration is missing")
+
+    updated=requests.models.complexjson.loads(requests.models.complexjson.dumps(current))
+    updated.setdefault("sleep",{})
+    updated.setdefault("location",{})
+    updated.setdefault("imu_trig",{})
+
+    if mode=="off":
+        # Battery-saver / travel-off: sleep between one-hour check-ins.
+        updated["sleep"]["mode"]="enable"
+        updated["location"]["interval_min"]=3600
+        updated["location"]["interval_max"]=3600
+        updated["imu_trig"]["motion"]="disable"
+        sleep_state="enable"
+        interval=3600
+        motion="disable"
+    elif mode=="armed":
+        # Security mode: keep the tracker reachable and restore motion detection.
+        updated["sleep"]["mode"]="disable"
+        updated["imu_trig"]["motion"]="medium"
+        sleep_state="disable"
+        interval=updated["location"].get("interval_max")
+        motion="medium"
+    else:
+        # Geofence mode keeps the existing Particle power profile for now.
+        return True
+
+    url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
+    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json","Content-Type":"application/json"}
+    r=requests.put(url,headers=headers,json=updated,timeout=20)
+    if not r.ok:
+        raise HTTPException(r.status_code,f"Particle power-profile update failed: {r.text[:260]}")
+
+    state["tracker_sleep"]=sleep_state
+    state["tracker_update_interval_sec"]=interval
+    state["imu_sensitivity"]=motion
+    state["imu_pending"]=motion
+    note("Tracker power profile",
+         "TRAVEL/OFF: low-power sleep, 60-minute check-in" if mode=="off"
+         else "ARMED: sleep disabled, motion detection MEDIUM")
+    return True
+
 def set_imu_motion(sensitivity):
     doc=get_particle_config()
     conf=doc.get("configuration") or {}
@@ -285,13 +333,21 @@ def request_fresh_location():
 
 @app.post("/api/trailer/mode")
 def setmode(x:Mode):
+    # Apply the tracker-side power/security profile first so the app mode
+    # reflects what Particle accepted (or queued for an offline device).
+    if x.mode in ("off","armed"):
+        set_tracker_power_profile(x.mode)
+
     state["mode"]=x.mode
     if x.mode=="off":
         state["alarm"]=False;state["alarm_reason"]=None
-    if x.mode=="armed":
+        state["_motion_started"]=None
+        note("Mode changed","off • tracker entering low-power sleep with 60-minute check-ins")
+        timeline("TRAVEL/OFF","Low-power sleep enabled • 60-minute check-ins",kind="mode")
+    elif x.mode=="armed":
         ok=request_fresh_location()
-        note("Mode changed","armed • fresh tracker location requested" if ok else "armed • tracker ping failed")
-        timeline("ARMED","Fresh tracker location requested" if ok else "Armed, but tracker ping failed",kind="mode")
+        note("Mode changed","armed • motion detection restored • fresh tracker location requested" if ok else "armed • motion restored • tracker ping failed")
+        timeline("ARMED","Sleep disabled • motion detection MEDIUM • fresh location requested" if ok else "Sleep disabled • motion detection MEDIUM • tracker ping failed",kind="mode")
     else:
         note("Mode changed",x.mode)
     return pub()
