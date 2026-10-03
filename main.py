@@ -1,4 +1,5 @@
 import os, math, time, hmac, requests, threading
+import psycopg
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -11,6 +12,7 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
+HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None}
 
 _alarm_poll_thread=None
@@ -28,6 +30,74 @@ class Event(BaseModel):
     motion:bool=False; alarm:bool=False; alarm_reason:Optional[str]=None; timestamp:Optional[str]=None
 
 def pub(): return {k:v for k,v in state.items() if not k.startswith("_")}
+
+_history_db_ready=False
+_history_db_error=None
+
+def history_init():
+    global _history_db_ready,_history_db_error
+    if not HISTORY_DATABASE_URL:
+        _history_db_ready=False
+        _history_db_error="History database URL is not configured"
+        return False
+    try:
+        with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tracker_history (
+                        id BIGSERIAL PRIMARY KEY,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        event_time TIMESTAMPTZ,
+                        category TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        detail TEXT,
+                        mode TEXT,
+                        alarm BOOLEAN,
+                        lat DOUBLE PRECISION,
+                        lon DOUBLE PRECISION,
+                        speed_mph DOUBLE PRECISION,
+                        battery_percent INTEGER,
+                        external_power BOOLEAN,
+                        lte TEXT,
+                        gps_fix BOOLEAN
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_created_at_idx ON tracker_history(created_at DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_category_idx ON tracker_history(category)")
+        _history_db_ready=True
+        _history_db_error=None
+        return True
+    except Exception as e:
+        _history_db_ready=False
+        _history_db_error=str(e)
+        print(f"History database init failed: {e}")
+        return False
+
+def history_record(category,title,detail="",event_time=None,lat=None,lon=None,
+                   speed_mph=None,battery_percent=None,external_power=None,lte=None,gps_fix=None):
+    global _history_db_ready,_history_db_error
+    if not HISTORY_DATABASE_URL:
+        return False
+    try:
+        if not _history_db_ready and not history_init():
+            return False
+        with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tracker_history
+                    (event_time,category,title,detail,mode,alarm,lat,lon,speed_mph,
+                     battery_percent,external_power,lte,gps_fix)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,(
+                    event_time,category,title,detail,state.get("mode"),bool(state.get("alarm")),
+                    lat,lon,speed_mph,battery_percent,external_power,lte,gps_fix
+                ))
+        return True
+    except Exception as e:
+        _history_db_ready=False
+        _history_db_error=str(e)
+        print(f"History write failed: {e}")
+        return False
 
 def refresh_vitals(force=False):
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
@@ -83,12 +153,15 @@ def refresh_vitals(force=False):
     except Exception as e:
         print(f"Particle vitals exception: {e}")
 def note(t,d):
-    state["events"].insert(0,{"title":t,"detail":d,"time":datetime.now(timezone.utc).isoformat()})
+    ts=datetime.now(timezone.utc).isoformat()
+    state["events"].insert(0,{"title":t,"detail":d,"time":ts})
     state["events"]=state["events"][:50]
+    history_record("event",t,d,event_time=ts)
 def timeline(stage,detail="",when=None,kind="info"):
     ts=when or datetime.now(timezone.utc).isoformat()
     state["timeline"].insert(0,{"stage":stage,"detail":detail,"time":ts,"kind":kind})
     state["timeline"]=state["timeline"][:100]
+    history_record(kind or "timeline",stage,detail,event_time=ts)
 
 def iso_from_event_time(v):
     if v is None:return None
@@ -308,6 +381,55 @@ def status():
         try: read_imu_motion()
         except Exception as e: print(f"Particle IMU read skipped: {e}")
     return pub()
+
+@app.get("/api/homebase/history")
+def homebase_history(hours:int=168,limit:int=1000):
+    global _history_db_ready,_history_db_error
+    limit=max(1,min(int(limit),5000))
+    hours=max(0,min(int(hours),24*365*10))
+    if not HISTORY_DATABASE_URL:
+        return {"persistent":False,"error":"History database is not connected","items":[]}
+    try:
+        if not _history_db_ready and not history_init():
+            return {"persistent":False,"error":_history_db_error,"items":[]}
+        sql="""
+            SELECT id,created_at,event_time,category,title,detail,mode,alarm,lat,lon,
+                   speed_mph,battery_percent,external_power,lte,gps_fix
+            FROM tracker_history
+        """
+        params=[]
+        if hours>0:
+            sql+=" WHERE created_at >= NOW() - make_interval(hours => %s)"
+            params.append(hours)
+        sql+=" ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql,params)
+                rows=cur.fetchall()
+        keys=["id","created_at","event_time","category","title","detail","mode","alarm",
+              "lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]
+        items=[]
+        for row in rows:
+            item=dict(zip(keys,row))
+            for k in ("created_at","event_time"):
+                if item.get(k) is not None:item[k]=item[k].isoformat()
+            items.append(item)
+        return {"persistent":True,"count":len(items),"hours":hours,"items":items}
+    except Exception as e:
+        _history_db_ready=False
+        _history_db_error=str(e)
+        print(f"History query failed: {e}")
+        return {"persistent":False,"error":str(e),"items":[]}
+
+@app.get("/api/homebase/summary")
+def homebase_summary():
+    return {
+        "history_database_configured":bool(HISTORY_DATABASE_URL),
+        "history_database_ready":bool(_history_db_ready),
+        "history_database_error":_history_db_error,
+        "live":pub()
+    }
 def request_fresh_location():
     """Request one fresh Tracker One location using the existing Particle get_loc command."""
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
@@ -577,6 +699,12 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         if v is not None: state[k]=v
     state["last_seen"]=x.timestamp or datetime.now(timezone.utc).isoformat()
     state["route"].append({"lat":x.lat,"lon":x.lon});state["route"]=state["route"][-200:]
+    history_record(
+        "location","LOCATION UPDATE",
+        "Motion trigger" if x.motion else "Tracker location received",
+        event_time=state["last_seen"],lat=x.lat,lon=x.lon,speed_mph=x.speed_mph,
+        battery_percent=x.battery_percent,external_power=x.external_power,lte=x.lte,gps_fix=x.gps_fix
+    )
     if state["home_lat"] is None:
         state["home_lat"],state["home_lon"]=x.lat,x.lon
         note("Home position set","First valid tracker position")
@@ -607,6 +735,8 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     return {"ok":True,"lat":x.lat,"lon":x.lon,"speed_mph":round(x.speed_mph,1)}
 @app.on_event("startup")
 def startup_discover():
+    history_init()
+    history_record("server","SERVER START","Rick's Trackers backend started")
     ensure_alarm_poll_worker()
     try: discover_telegram_chat()
     except Exception as e: print(f"Telegram startup discovery skipped: {e}")
