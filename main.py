@@ -132,6 +132,24 @@ def auth_webhook(h):
 
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
+
+@app.get("/api/trailer/imu-config")
+def imu_config():
+    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
+        raise HTTPException(503,"Particle control is not configured")
+    r=requests.get(
+        f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}",
+        headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"},
+        timeout=15
+    )
+    if not r.ok:
+        raise HTTPException(r.status_code,f"Particle config lookup failed: {r.text[:220]}")
+    cfg=r.json()
+    return {
+        "imu_trig":cfg.get("imu_trig"),
+        "location":cfg.get("location"),
+        "geofence":cfg.get("geofence")
+    }
 @app.get("/api/trailer/status")
 def status():
     telegram_ready()
