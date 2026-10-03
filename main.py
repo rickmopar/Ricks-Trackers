@@ -9,7 +9,9 @@ app=FastAPI(title="Rick's Trackers")
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
 TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
-state={"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None}
+PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
+PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"gps_fix":None,"last_seen":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -89,6 +91,32 @@ def setgeo(x:Fence):
 @app.post("/api/trailer/live")
 def setlive(x:Live):
     state["live"]=x.enabled; note("Live tracking request","Frequent updates requested" if x.enabled else "Normal updates requested"); return pub()
+@app.post("/api/trailer/ping")
+def ping_tracker():
+    if not PARTICLE_DEVICE_ID:
+        raise HTTPException(503,"Particle device ID is not configured")
+    if not PARTICLE_ACCESS_TOKEN:
+        raise HTTPException(503,"Particle API token is not configured yet")
+    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"}
+    # First verify cloud connectivity, then ask Tracker Edge for a fresh location.
+    pr=requests.put(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/ping",headers=headers,timeout=15)
+    if not pr.ok:
+        raise HTTPException(502,f"Particle ping failed: {pr.text[:180]}")
+    pdata=pr.json()
+    if not pdata.get("online"):
+        note("Tracker ping","Tracker is offline")
+        return {"ok":False,"online":False,"message":"Tracker is offline"}
+    cr=requests.post(
+        f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/cmd",
+        headers={**headers,"Content-Type":"application/json"},
+        json={"arg":'{"cmd":"get_loc"}'},timeout=20
+    )
+    if not cr.ok:
+        raise HTTPException(502,f"Location request failed: {cr.text[:180]}")
+    result=cr.json()
+    note("Tracker ping","Fresh location requested from Tracker One")
+    return {"ok":True,"online":True,"requested":True,"return_value":result.get("return_value")}
+
 @app.post("/api/trailer/test-alert")
 def testalert():
     if not TELEGRAM_BOT_TOKEN:raise HTTPException(503,"Telegram bot is not configured on the server")
