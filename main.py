@@ -81,22 +81,46 @@ def auth_dashboard(x_tracker_key:Optional[str]=Header(default=None)):
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
 @app.get("/api/trailer/status")
-def status(): telegram_ready();return pub()
+def status(x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key); telegram_ready(); return pub()
 @app.post("/api/trailer/mode")
-def setmode(x:Mode):
+def setmode(x:Mode,x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key)
     state["mode"]=x.mode
     if x.mode=="off":state["alarm"]=False;state["alarm_reason"]=None
     note("Mode changed",x.mode);return pub()
 @app.post("/api/trailer/geofence")
-def setgeo(x:Fence): state["geofence_ft"]=x.feet;note("Geofence changed",f"{x.feet} ft");return pub()
+def setgeo(x:Fence,x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key); state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
 @app.post("/api/trailer/live")
-def setlive(x:Live): state["live"]=x.enabled;note("Live tracking","Frequent updates" if x.enabled else "Normal updates");return pub()
-@app.post("/api/trailer/test-sms")
-def testsms():
+def setlive(x:Live,x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key); state["live"]=x.enabled; note("Live tracking request","Frequent updates requested" if x.enabled else "Normal updates requested"); return pub()
+@app.post("/api/trailer/test-alert")
+def testalert(x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key)
     if not TELEGRAM_BOT_TOKEN:raise HTTPException(503,"Telegram bot is not configured on the server")
-    if not discover_telegram_chat():raise HTTPException(503,"Open your Telegram bot and press Start, then try again")
+    if not discover_telegram_chat():raise HTTPException(503,"Open your Telegram bot and send a message, then try again")
     send_alert("✅ RICK'S TRACKERS TEST\nTelegram alerts are working.",f"test-{time.time()}",True)
     return {"ok":True,"channel":"telegram"}
+
+@app.post("/api/trailer/test-sms")
+def testsms_compat(x_tracker_key:Optional[str]=Header(default=None)):
+    return testalert(x_tracker_key)
+
+@app.post("/api/trailer/set-home")
+def sethome(x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key)
+    if state["lat"] is None or state["lon"] is None: raise HTTPException(409,"No live tracker position yet")
+    state["home_lat"],state["home_lon"]=state["lat"],state["lon"]
+    note("Home position set","Current tracker position")
+    return pub()
+
+@app.post("/api/trailer/clear-alarm")
+def clear(x_tracker_key:Optional[str]=Header(default=None)):
+    auth_dashboard(x_tracker_key)
+    state["alarm"]=False;state["alarm_reason"]=None
+    note("Alarm cleared","Returned to monitoring")
+    return pub()
 @app.post("/api/particle/webhook")
 def webhook(x:Event,authorization:Optional[str]=Header(default=None)):
     auth_webhook(authorization);prev=state["external_power"]
@@ -105,11 +129,22 @@ def webhook(x:Event,authorization:Optional[str]=Header(default=None)):
     state["route"].append({"lat":x.lat,"lon":x.lon});state["route"]=state["route"][-200:]
     if state["home_lat"] is None:state["home_lat"],state["home_lon"]=x.lat,x.lon;note("Home position set","First valid tracker position")
     if x.alarm:alarm(x.alarm_reason or "Tracker alarm","device-alarm")
+    if state["mode"]=="armed":
+        moving=bool(x.motion or x.speed_mph>=1.0)
+        if moving:
+            if state["_motion_started"] is None: state["_motion_started"]=time.time()
+            elif time.time()-state["_motion_started"]>=10: alarm("Movement detected for 10 seconds","movement")
+        else:
+            state["_motion_started"]=None
+    else:
+        state["_motion_started"]=None
     if state["mode"] in ("armed","geofence") and state["home_lat"] is not None:
         if miles(state["home_lat"],state["home_lon"],x.lat,x.lon)*5280>state["geofence_ft"]:alarm(f"Trailer left the {state['geofence_ft']} ft geofence",f"geo-{state['geofence_ft']}")
     if prev is True and x.external_power is False and state["mode"]!="off":alarm("External tracker power disconnected","power-loss")
     return {"ok":True}
-@app.post("/api/trailer/clear-alarm")
-def clear(): state["alarm"]=False;state["alarm_reason"]=None;note("Alarm cleared","Returned to monitoring");return pub()
+@app.on_event("startup")
+def startup_discover():
+    try: discover_telegram_chat()
+    except Exception as e: print(f"Telegram startup discovery skipped: {e}")
 
 app.mount("/",StaticFiles(directory=".",html=True),name="static")
