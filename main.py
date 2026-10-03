@@ -97,25 +97,28 @@ def ping_tracker():
         raise HTTPException(503,"Particle device ID is not configured")
     if not PARTICLE_ACCESS_TOKEN:
         raise HTTPException(503,"Particle API token is not configured yet")
-    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"}
-    # First verify cloud connectivity, then ask Tracker Edge for a fresh location.
-    pr=requests.put(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/ping",headers=headers,timeout=15)
-    if not pr.ok:
-        raise HTTPException(502,f"Particle ping failed: {pr.text[:180]}")
-    pdata=pr.json()
-    if not pdata.get("online"):
-        note("Tracker ping","Tracker is offline")
-        return {"ok":False,"online":False,"message":"Tracker is offline"}
+    headers={
+        "Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}",
+        "Content-Type":"application/json",
+        "Accept":"application/json"
+    }
     cr=requests.post(
         f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/cmd",
-        headers={**headers,"Content-Type":"application/json"},
-        json={"arg":'{"cmd":"get_loc"}'},timeout=20
+        headers=headers,
+        json={"arg":'{"cmd":"get_loc"}'},
+        timeout=35
     )
     if not cr.ok:
-        raise HTTPException(502,f"Location request failed: {cr.text[:180]}")
+        print(f"Particle cmd failed status={cr.status_code} body={cr.text[:300]}")
+        raise HTTPException(cr.status_code if cr.status_code < 500 else 502,
+                            f"Particle location request failed: {cr.text[:220]}")
     result=cr.json()
+    rv=result.get("return_value")
+    connected=result.get("connected",True)
+    if rv not in (0,None):
+        raise HTTPException(502,f"Tracker rejected get_loc command (return value {rv})")
     note("Tracker ping","Fresh location requested from Tracker One")
-    return {"ok":True,"online":True,"requested":True,"return_value":result.get("return_value")}
+    return {"ok":True,"online":bool(connected),"requested":True,"return_value":rv}
 
 @app.post("/api/trailer/test-alert")
 def testalert():
