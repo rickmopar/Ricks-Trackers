@@ -30,6 +30,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="card"><b>Geofence radius</b><div class="geos"><button id="g100" onclick="geo(100)">100 ft</button><button id="g500" onclick="geo(500)">500 ft</button><button id="g1000" onclick="geo(1000)">1000 ft</button></div></div>
 <div class="card"><b>Motion sensitivity</b><div class="geos imus"><button id="ilow" onclick="imu('low')">LOW</button><button id="imedium" onclick="imu('medium')">MEDIUM</button><button id="ihigh" onclick="imu('high')">HIGH</button></div><div class="small" style="margin-top:8px">Used by ARMED mode for trailer movement detection.</div></div>
 <div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button onclick="setHome()">SET HOME HERE</button><button onclick="clearAlarm()">CLEAR ALARM</button><button type="button" class="test" id="pingBtn">PING TRACKER</button><button type="button" class="test" id="trackBtn">TRACK THE TRACKER</button><button type="button" class="test" id="testSmsBtn">TEST TELEGRAM ALERT</button></div></div>
+<div class="card"><b>Activity Timeline</b><div class="small" style="margin-top:4px">Shows the motion event path from Tracker One through Particle to Telegram.</div><div id="timeline" class="small" style="margin-top:8px">No motion timeline yet.</div></div>
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
 const $=id=>document.getElementById(id);let latestState=null;let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
@@ -42,7 +43,8 @@ function render(s){latestState=s;$('conn').textContent='Connected';$('last').tex
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));['low','medium','high'].forEach(x=>$('i'+x).classList.toggle('active',s.imu_sensitivity===x));
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
 if(typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
-$('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.'}
+$('timeline').innerHTML=(s.timeline||[]).slice(0,12).map(e=>'<div class="event"><div class="et">'+esc(e.stage)+'</div><div class="ed">'+esc(e.detail||'')+' • '+new Date(e.time).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'})+'</div></div>').join('')||'No motion timeline yet.';
+$('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.'
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function centerMap(){
   const ll=marker.getLatLng();
