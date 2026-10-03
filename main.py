@@ -133,6 +133,52 @@ def auth_webhook(h):
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
 
+def ensure_imu_motion():
+    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
+        print("Particle IMU setup skipped: control not configured")
+        return False
+    url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
+    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"}
+    r=requests.get(url,headers=headers,timeout=15)
+    if not r.ok:
+        print(f"Particle IMU GET failed status={r.status_code} body={r.text[:300]}")
+        return False
+    doc=r.json()
+    current=((doc.get("configuration") or {}).get("current") or {})
+    if not isinstance(current,dict):
+        print("Particle IMU setup failed: current config missing")
+        return False
+    imu=current.get("imu_trig") if isinstance(current.get("imu_trig"),dict) else {}
+    if imu.get("motion")=="medium":
+        print("Particle IMU motion already medium")
+        return True
+
+    updated=requests.models.complexjson.loads(requests.models.complexjson.dumps(current))
+    updated.setdefault("imu_trig",{})["motion"]="medium"
+    p=requests.put(
+        url,
+        headers={**headers,"Content-Type":"application/json"},
+        json=updated,
+        timeout=20
+    )
+    if not p.ok:
+        print(f"Particle IMU PUT failed status={p.status_code} body={p.text[:500]}")
+        return False
+    print(f"Particle IMU PUT accepted status={p.status_code}")
+
+    time.sleep(2)
+    v=requests.get(url,headers=headers,timeout=15)
+    if not v.ok:
+        print(f"Particle IMU verify GET failed status={v.status_code} body={v.text[:300]}")
+        return False
+    vdoc=v.json()
+    conf=vdoc.get("configuration") or {}
+    cur=((conf.get("current") or {}).get("imu_trig") or {}).get("motion")
+    pend=((conf.get("pending") or {}).get("imu_trig") or {}).get("motion")
+    ok=(cur=="medium" or pend=="medium")
+    print(f"Particle IMU verify current={cur} pending={pend} ok={ok}")
+    return ok
+
 @app.get("/api/trailer/imu-config")
 def imu_config():
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
@@ -361,14 +407,8 @@ def startup_discover():
     try: discover_telegram_chat()
     except Exception as e: print(f"Telegram startup discovery skipped: {e}")
     try:
-        if PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID:
-            r=requests.get(
-                f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}",
-                headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"},
-                timeout=15
-            )
-            print(f"Particle IMU config probe status={r.status_code} body={r.text[:1200]}")
+        ensure_imu_motion()
     except Exception as e:
-        print(f"Particle IMU config probe exception: {e}")
+        print(f"Particle IMU setup exception: {e}")
 
 app.mount("/",StaticFiles(directory=".",html=True),name="static")
