@@ -28,7 +28,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="stat"><div class="label">Text alerts</div><div class="value" id="sms">—</div></div><div class="stat"><div class="label">Last text</div><div class="value" id="lastsms">—</div></div>
 <div class="stat full"><div class="label">Current mode</div><div class="value" id="mode">—</div></div></div></div>
 <div class="card"><b>Geofence radius</b><div class="geos"><button id="g100" onclick="geo(100)">100 ft</button><button id="g500" onclick="geo(500)">500 ft</button><button id="g1000" onclick="geo(1000)">1000 ft</button></div></div>
-<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button class="test" onclick="testSms()">TEST TEXT ALERT</button></div></div>
+<div class="card"><b>Tracking & alerts</b><div class="actions"><button onclick="live(true)">LIVE TRACK</button><button onclick="live(false)">NORMAL UPDATES</button><button type="button" class="test" id="testSmsBtn">TEST TEXT ALERT</button></div></div>
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
 const $=id=>document.getElementById(id);let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
@@ -47,6 +47,26 @@ async function refresh(){try{render(await api('/api/trailer/status'))}catch(e){$
 async function mode(x){try{render(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));msg('Mode changed to '+label(x))}catch(e){msg(e.message,'red')}}
 async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST',body:JSON.stringify({feet:x})}));msg('Geofence set to '+x+' ft')}catch(e){msg(e.message,'red')}}
 async function live(x){try{render(await api('/api/trailer/live',{method:'POST',body:JSON.stringify({enabled:x})}));msg(x?'Live tracking requested':'Normal updates restored')}catch(e){msg(e.message,'red')}}
-async function testSms(){try{await api('/api/trailer/test-sms',{method:'POST',body:'{}'});msg('Test text sent. Check your phone.');setTimeout(refresh,500)}catch(e){msg(e.message,'red')}}
+async function testSms(){
+  const b=$('testSmsBtn');
+  if(!b)return;
+  b.disabled=true;
+  const old=b.textContent;
+  b.textContent='SENDING…';
+  msg('Sending test text…','amber');
+  try{
+    await api('/api/trailer/test-sms',{method:'POST',body:'{}'});
+    b.textContent='TEXT SENT ✓';
+    msg('Test text sent. Check your phone.','green');
+    setTimeout(refresh,500);
+  }catch(e){
+    b.textContent='FAILED — TAP AGAIN';
+    msg('Text test failed: '+e.message,'red');
+  }finally{
+    setTimeout(()=>{b.disabled=false;b.textContent=old},3000);
+  }
+}
+const testButton=$('testSmsBtn');
+if(testButton)testButton.addEventListener('click',testSms);
 refresh();setInterval(refresh,10000);
 </script></body></html>
