@@ -33,8 +33,27 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="card"><b>Activity Timeline</b><div class="small" style="margin-top:4px">Shows the motion event path from Tracker One through Particle to Telegram.</div><div id="timeline" class="small" style="margin-top:8px">No motion timeline yet.</div></div>
 <div class="card"><b>Recent events</b><div id="events" class="small" style="margin-top:8px">No events yet.</div></div>
 </div><script>
-const $=id=>document.getElementById(id);let latestState=null;let map=L.map('map').setView([36.85,-76.1],10),marker=L.marker([36.85,-76.1]).addTo(map),fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map),route=L.polyline([],{weight:4}).addTo(map);
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(map);
+const $=id=>document.getElementById(id);
+let latestState=null,map=null,marker=null,fence=null,route=null;
+function initMap(){
+  if(typeof window.L==='undefined'){
+    const el=$('map');
+    if(el)el.innerHTML='<div style="height:100%;display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:#93a4ba">Map unavailable on this connection. Tracker controls and status are still working.</div>';
+    return false;
+  }
+  try{
+    map=L.map('map').setView([36.85,-76.1],10);
+    marker=L.marker([36.85,-76.1]).addTo(map);
+    fence=L.circle([36.85,-76.1],{radius:304.8,weight:2,fillOpacity:.1}).addTo(map);
+    route=L.polyline([],{weight:4}).addTo(map);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Tiles © Esri'}).addTo(map);
+    return true;
+  }catch(e){
+    console.warn('Map initialization failed',e);
+    return false;
+  }
+}
+initMap();
 function age(x){if(!x)return'—';let s=Math.max(0,(Date.now()-new Date(x))/1000);return s<60?Math.floor(s)+' sec ago':s<3600?Math.floor(s/60)+' min ago':s<86400?Math.floor(s/3600)+' hr ago':Math.floor(s/86400)+' day ago'}
 function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRAVEL / OFF'}
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
@@ -42,11 +61,15 @@ async function api(p,o={}){let r=await fetch(p,{headers:{'Content-Type':'applica
 function render(s){latestState=s;$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));['low','medium','high'].forEach(x=>$('i'+x).classList.toggle('active',s.imu_sensitivity===x));
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
-if(typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
+if(map&&marker&&fence&&route&&typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
 $('timeline').innerHTML=(s.timeline||[]).slice(0,12).map(e=>'<div class="event"><div class="et">'+esc(e.stage)+'</div><div class="ed">'+esc(e.detail||'')+' • '+new Date(e.time).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'})+'</div></div>').join('')||'No motion timeline yet.';
 $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.'
 function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function centerMap(){
+  if(!map||!marker||typeof window.L==='undefined'){
+    msg('Map is unavailable on this connection.','amber');
+    return;
+  }
   const ll=marker.getLatLng();
   const oneMileLat=1/69.0;
   const bounds=L.latLngBounds(
