@@ -133,6 +133,20 @@ def auth_webhook(h):
 @app.get("/api/health")
 def health(): return {"ok":True,"telegram_configured":telegram_ready()}
 
+def ensure_development_device():
+    if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
+        print("Particle development-device setup skipped: control not configured")
+        return False
+    url=f"https://api.particle.io/v1/products/46064/devices/{PARTICLE_DEVICE_ID}"
+    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json"}
+    r=requests.put(url,headers=headers,data={"development":"true"},timeout=20)
+    if not r.ok:
+        print(f"Particle development-device PUT failed status={r.status_code} body={r.text[:500]}")
+        return False
+    doc=r.json() if r.text else {}
+    print(f"Particle development-device status={r.status_code} development={doc.get('development')}")
+    return bool(doc.get("development") is True or str(doc.get("development")).lower()=="true")
+
 def ensure_imu_motion():
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
         print("Particle IMU setup skipped: control not configured")
@@ -407,7 +421,11 @@ def startup_discover():
     try: discover_telegram_chat()
     except Exception as e: print(f"Telegram startup discovery skipped: {e}")
     try:
-        ensure_imu_motion()
+        dev_ok=ensure_development_device()
+        print(f"Particle development-device verify ok={dev_ok}")
+        if dev_ok:
+            time.sleep(1)
+            ensure_imu_motion()
     except Exception as e:
         print(f"Particle IMU setup exception: {e}")
 
