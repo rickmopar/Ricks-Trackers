@@ -33,10 +33,13 @@ def discover_telegram_chat():
     r=requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",timeout=10)
     r.raise_for_status()
     data=r.json()
-    for upd in reversed(data.get("result",[])):
-        msg=upd.get("message") or upd.get("channel_post")
+    updates=data.get("result",[])
+    print(f"Telegram getUpdates ok={data.get('ok')} count={len(updates)}")
+    for upd in reversed(updates):
+        msg=upd.get("message") or upd.get("channel_post") or upd.get("edited_message")
         if msg and msg.get("chat",{}).get("id"):
             state["telegram_chat_id"]=str(msg["chat"]["id"])
+            print("Telegram chat discovered")
             break
     telegram_ready()
     return state.get("telegram_chat_id")
