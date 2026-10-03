@@ -11,7 +11,7 @@ TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0}
 
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
@@ -163,11 +163,15 @@ def read_imu_motion():
     conf=doc.get("configuration") or {}
     current=conf.get("current") or {}
     pending=conf.get("pending") or {}
-    motion=((pending.get("imu_trig") or {}).get("motion")
-            or (current.get("imu_trig") or {}).get("motion"))
-    if motion in ("low","medium","high","disable"):
-        state["imu_sensitivity"]=motion
-    return motion
+    current_motion=(current.get("imu_trig") or {}).get("motion")
+    pending_motion=(pending.get("imu_trig") or {}).get("motion")
+    if current_motion in ("low","medium","high","disable"):
+        state["imu_sensitivity"]=current_motion
+    if pending_motion in ("low","medium","high","disable"):
+        state["imu_pending"]=pending_motion
+    else:
+        state["imu_pending"]=None
+    return pending_motion or current_motion
 
 def set_imu_motion(sensitivity):
     doc=get_particle_config()
@@ -182,13 +186,16 @@ def set_imu_motion(sensitivity):
     r=requests.put(url,headers=headers,json=updated,timeout=20)
     if not r.ok:
         raise HTTPException(r.status_code,f"Particle IMU update failed: {r.text[:260]}")
+    state["imu_sensitivity"]=sensitivity
+    state["imu_pending"]=sensitivity
     time.sleep(1)
     actual=read_imu_motion()
-    if actual != sensitivity:
-        raise HTTPException(502,f"Particle has not applied {sensitivity} sensitivity yet")
-    state["imu_sensitivity"]=actual
-    note("Motion sensitivity changed",actual.upper())
-    return actual
+    confirmed=(state.get("imu_sensitivity")==sensitivity)
+    queued=(state.get("imu_pending")==sensitivity)
+    if not (confirmed or queued):
+        raise HTTPException(502,f"Particle did not accept {sensitivity} sensitivity")
+    note("Motion sensitivity changed",sensitivity.upper() + (" (pending device apply)" if queued and not confirmed else ""))
+    return sensitivity
 
 @app.get("/api/trailer/imu-config")
 def imu_config():
@@ -204,7 +211,7 @@ def imu_config():
 @app.post("/api/trailer/imu-sensitivity")
 def imu_sensitivity(x:ImuSensitivity):
     actual=set_imu_motion(x.sensitivity)
-    return {"ok":True,"imu_sensitivity":actual}
+    return {"ok":True,"imu_sensitivity":actual,"imu_pending":state.get("imu_pending")}
 @app.get("/api/trailer/status")
 def status():
     telegram_ready()
@@ -348,9 +355,14 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         except Exception: lte=None
 
         trig=container.get("trig",container.get("trigger",container.get("triggers",[])))
-        if isinstance(trig,str): triggers=[trig]
-        elif isinstance(trig,list): triggers=[str(t) for t in trig]
+        if isinstance(trig,str): triggers=[trig.lower()]
+        elif isinstance(trig,list): triggers=[str(t).lower() for t in trig]
         else: triggers=[]
+        imu_motion=any(
+            t=="imu_m" or t.startswith("imu_") or "motion" in t or t in ("move","movement")
+            for t in triggers
+        )
+        print(f"Particle loc triggers={triggers} imu_motion={imu_motion} mode={state['mode']}")
 
         timestamp=raw.get("published_at") if isinstance(raw,dict) else None
         event_time=container.get("time",container.get("timestamp"))
@@ -368,7 +380,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             external_power=None,
             lte=lte,
             gps_fix=bool(lock),
-            motion=any(t in ("imu_m","radius","motion","move") for t in triggers),
+            motion=imu_motion,
             alarm=False,alarm_reason=None,timestamp=timestamp
         )
     else:
