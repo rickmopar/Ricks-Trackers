@@ -117,46 +117,95 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     auth_webhook(authorization)
     raw=await request.json()
 
-    # Particle webhooks normally wrap the actual event JSON in the "data" field.
+    # Particle webhooks wrap the device event in "data"; Tracker firmware versions
+    # can vary the exact nesting, so normalize several known native shapes.
     payload=raw
     if isinstance(raw,dict) and "data" in raw:
         data=raw.get("data")
         if isinstance(data,str):
             try: payload=requests.models.complexjson.loads(data)
             except Exception: payload={"raw":data}
-        elif isinstance(data,dict):
+        elif isinstance(data,(dict,list)):
             payload=data
 
-    # Native Tracker One / Tracker Edge loc and loc-enhanced event.
-    if isinstance(payload,dict) and isinstance(payload.get("loc"),dict):
-        loc=payload["loc"]
-        if "lat" not in loc or "lon" not in loc:
-            return {"ok":True,"ignored":"no valid location yet"}
-        lat=float(loc["lat"]); lon=float(loc["lon"])
-        spd=loc.get("spd",loc.get("speed",0)) or 0
-        speed_mph=float(spd)*2.2369362920544
-        batt=loc.get("batt")
-        cell=loc.get("cell")
-        triggers=[str(t) for t in (payload.get("trig") or [])]
+    def find_loc(obj):
+        if isinstance(obj,dict):
+            loc=obj.get("loc")
+            if isinstance(loc,dict) and ("lat" in loc or "latitude" in loc) and ("lon" in loc or "lng" in loc or "longitude" in loc):
+                return loc,obj
+            if ("lat" in obj or "latitude" in obj) and ("lon" in obj or "lng" in obj or "longitude" in obj):
+                return obj,obj
+            for v in obj.values():
+                found=find_loc(v)
+                if found:return found
+        elif isinstance(obj,list):
+            for v in obj:
+                found=find_loc(v)
+                if found:return found
+        return None
+
+    def scalar(v,*keys):
+        if isinstance(v,(int,float,str)): return v
+        if isinstance(v,dict):
+            for k in keys:
+                if k in v and isinstance(v[k],(int,float,str)): return v[k]
+        return None
+
+    found=find_loc(payload)
+    if found:
+        loc,container=found
+        lat=loc.get("lat",loc.get("latitude"))
+        lon=loc.get("lon",loc.get("lng",loc.get("longitude")))
+        try: lat=float(lat); lon=float(lon)
+        except Exception:
+            return {"ok":True,"ignored":"location coordinates not numeric"}
+
+        spd=loc.get("spd",loc.get("speed",container.get("spd",container.get("speed",0)))) or 0
+        try: speed_mph=float(spd)*2.2369362920544
+        except Exception: speed_mph=0
+
+        batt=loc.get("batt",container.get("batt",container.get("battery")))
+        batt=scalar(batt,"soc","percent","pct","charge")
+        try: batt_pct=None if batt is None else int(round(float(batt)))
+        except Exception: batt_pct=None
+
+        cell=loc.get("cell",container.get("cell",container.get("cellular")))
+        cell=scalar(cell,"strength","quality","percent","pct")
+        try: lte=None if cell is None else f"{float(cell):.0f}%"
+        except Exception: lte=None
+
+        trig=container.get("trig",container.get("trigger",container.get("triggers",[])))
+        if isinstance(trig,str): triggers=[trig]
+        elif isinstance(trig,list): triggers=[str(t) for t in trig]
+        else: triggers=[]
+
         timestamp=raw.get("published_at") if isinstance(raw,dict) else None
-        if not timestamp and payload.get("time"):
-            try: timestamp=datetime.fromtimestamp(float(payload["time"]),timezone.utc).isoformat()
+        event_time=container.get("time",container.get("timestamp"))
+        if not timestamp and event_time:
+            try:
+                if isinstance(event_time,(int,float)) or str(event_time).replace(".","",1).isdigit():
+                    timestamp=datetime.fromtimestamp(float(event_time),timezone.utc).isoformat()
+                else: timestamp=str(event_time)
             except Exception: timestamp=None
+
+        lock=loc.get("lck",loc.get("lock",loc.get("fix",True)))
         x=Event(
             lat=lat,lon=lon,speed_mph=speed_mph,
-            battery_percent=None if batt is None else int(round(float(batt))),
+            battery_percent=batt_pct,
             external_power=None,
-            lte=None if cell is None else f"{float(cell):.0f}%",
-            gps_fix=bool(loc.get("lck",1)),
-            motion=("imu_m" in triggers or "radius" in triggers),
-            alarm=False,
-            alarm_reason=None,
-            timestamp=timestamp
+            lte=lte,
+            gps_fix=bool(lock),
+            motion=any(t in ("imu_m","radius","motion","move") for t in triggers),
+            alarm=False,alarm_reason=None,timestamp=timestamp
         )
     else:
-        # Also accept our direct/custom event format.
+        # Keep custom/test payload support, but don't make Particle disable/retry a
+        # valid webhook just because a non-location event has a different schema.
         try: x=Event(**payload)
-        except Exception as e: raise HTTPException(422,f"Unsupported Particle payload: {e}")
+        except Exception:
+            event_name=raw.get("event") if isinstance(raw,dict) else None
+            print(f"Particle event ignored: event={event_name} payload_type={type(payload).__name__}")
+            return {"ok":True,"ignored":"non-location or unsupported Particle event"}
 
     prev=state["external_power"]
     for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:
