@@ -15,6 +15,9 @@
 .pill{display:inline-block;padding:7px 11px;border-radius:999px;font-size:12px;font-weight:900}.secure{background:#143725;color:#8df0b8}.alarm{background:#4a1d25;color:#ffb1bb}.off{background:#3a2d17;color:#ffd789}
 .history{max-height:820px;overflow:auto;border-top:1px solid var(--line);margin-top:10px}.row{display:grid;grid-template-columns:170px 130px minmax(180px,1fr) 95px 80px;gap:10px;padding:10px 4px;border-bottom:1px solid #1f2e42;align-items:start;font-size:12px}.row.head{position:sticky;top:0;background:var(--panel);z-index:2;font-weight:900;color:var(--muted)}.title{font-weight:900;color:var(--text)}.muted{color:var(--muted)}.dbgood{color:#8df0b8}.dbbad{color:#ffd789}
 @media(max-width:1000px){.layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}#map{height:360px}.row{grid-template-columns:130px 95px 1fr}.row>*:nth-child(4),.row>*:nth-child(5){display:none}}
+
+.console-status,.charts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.charts{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:14px}.service,.chart{background:#0b1522;border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}.service strong{display:block;margin:9px 0;font-size:19px}.ok{color:#20c8d4}.warn{color:var(--amber)}.bad{color:var(--red)}.chart svg{width:100%;height:150px;display:block;margin-top:12px}.console-log{max-height:240px;overflow:auto;font:12px/1.8 ui-monospace,monospace;margin-top:14px}.console-log div{border-bottom:1px solid var(--line);padding:4px}.legend{display:flex;gap:15px;font-size:12px;color:var(--muted)}.console-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}.console-head h2{margin:0 0 6px}.metricline{margin-top:12px;color:var(--muted);font-size:12px}
+@media(max-width:700px){.console-status,.charts{grid-template-columns:1fr 1fr}.charts{grid-template-columns:1fr}}
 </style>
 </head>
 <body><div class="wrap">
@@ -23,6 +26,25 @@
   <div><a href="/">← PHONE APP</a> &nbsp; <span id="conn" class="small">Connecting…</span></div>
 </div>
 
+
+<section class="card" aria-label="Operations console">
+ <div class="console-head"><div><h2>Data console</h2><div class="small">Last 60 minutes · activity observed by this backend · resets when Render restarts</div></div><div id="consoleChecked" class="small" role="status">Checking services…</div></div>
+ <div class="console-status" style="margin-top:14px">
+  <div class="service"><div class="label">Your connection</div><strong id="linkStatus">Checking…</strong><div class="small" id="linkDetail">Browser → Home Base</div></div>
+  <div class="service"><div class="label">Render backend</div><strong id="renderStatus">Checking…</strong><div class="small" id="renderDetail">Waiting for response</div></div>
+  <div class="service"><div class="label">Particle</div><strong id="particleStatus">Not checked</strong><div class="small" id="particleDetail">Cloud API and tracker</div></div>
+  <div class="service"><div class="label">Telegram</div><strong id="telegramStatus">Not checked</strong><div class="small" id="telegramDetail">Bot API and alert results</div></div>
+ </div>
+ <div class="metricline" id="consoleMetrics">Cellular data usage: unavailable · not collected by this app</div>
+ <div class="charts">
+  <div class="chart"><b>Tracker online</b><div class="small">Particle cloud reading · gaps mean not sampled</div><div id="onlineChart"></div></div>
+  <div class="chart"><b>Incoming event traffic</b><div class="small">Authenticated webhooks received per minute</div><div id="eventChart"></div></div>
+  <div class="chart"><b>Location requests</b><div class="small">Manual and automatic alarm pings per minute</div><div id="pingChart"></div></div>
+  <div class="chart"><b>Telegram alerts</b><div class="small">Accepted by Telegram, failed, or skipped per minute</div><div id="telegramChart"></div></div>
+ </div>
+ <div class="legend"><span style="color:#20c8d4">● Success / received</span><span style="color:#ff5063">● Failure</span><span>● Skipped / offline</span></div>
+ <details style="margin-top:16px" open><summary>Event console · latest 100 observations</summary><div id="consoleLog" class="console-log">No observations yet.</div></details>
+</section>
 <div class="layout">
 <div>
   <div class="card">
@@ -93,6 +115,39 @@ function setHours(h){hours=h;[24,168,720,0].forEach(x=>$('f'+x).classList.toggle
 async function mode(x){try{renderLive(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));setTimeout(refresh,1000)}catch(e){alert(e.message)}}
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
 async function clearAlarm(){try{renderLive(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));setTimeout(refresh,500)}catch(e){alert(e.message)}}
-refresh();setInterval(refresh,10000);
+
+let consoleBusy=false,consoleLastSuccess=0;
+function service(name,text,detail,kind){$(name+'Status').textContent=text;$(name+'Status').className=kind;$(name+'Detail').textContent=detail}
+function chart(id,buckets,keys,online=false){
+ const W=600,H=150,pad=22,colors=['#20c8d4','#ff5063','#738196'];
+ const max=online?1:Math.max(1,...buckets.map(b=>keys.reduce((n,k)=>n+(b[k]||0),0)));
+ const step=(W-pad*2)/Math.max(1,buckets.length);
+ let svg='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="'+esc(id)+'"><line x1="22" y1="125" x2="578" y2="125" stroke="#38495c"/><text x="3" y="22" fill="#93a4ba" font-size="11">'+max+'</text><text x="3" y="125" fill="#93a4ba" font-size="11">0</text>';
+ buckets.forEach((b,i)=>{let y=125;keys.forEach((k,j)=>{if(online&&typeof b[k]!=='boolean')return;let val=online?Number(b[k]):(b[k]||0),h=val/max*100;let color=online&&val===0?'#738196':colors[j];svg+='<rect x="'+(pad+i*step)+'" y="'+(y-(h||2))+'" width="'+Math.max(1,step-2)+'" height="'+(h||2)+'" fill="'+color+'" opacity="'+(val||online?1:.12)+'"><title>'+esc(new Date(b.time*1000).toLocaleTimeString()+' · '+k+': '+val)+'</title></rect>';y-=h})});
+ if(buckets.length)svg+='<text x="22" y="146" fill="#93a4ba" font-size="11">'+esc(new Date(buckets[0].time*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))+'</text><text x="578" y="146" text-anchor="end" fill="#93a4ba" font-size="11">Now</text>';
+ $(id).innerHTML=svg+'</svg>';
+}
+async function refreshConsole(){
+ if(consoleBusy)return;consoleBusy=true;const start=performance.now();
+ try{
+  const r=await fetch('/api/homebase/console',{cache:'no-store',signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();consoleLastSuccess=Date.now();
+  service('link','Connected',Math.round(performance.now()-start)+' ms response','ok');
+  service('render','Responding','Uptime '+Math.floor(d.render.uptime_sec/60)+' min'+(d.render.commit?' · '+d.render.commit:''),'ok');
+  const p=d.services.particle,t=d.services.telegram;
+  service('particle',p.status==='connected'?(p.device_online===true?'Tracker online':p.device_online===false?'Tracker offline':'Cloud connected'):p.status.replaceAll('_',' '),p.status==='connected'?'Cloud API reachable · last contact '+age(p.last_heard):'Last API check '+age(new Date(p.checked_at*1000)),p.status==='connected'&&p.device_online===true?'ok':'warn');
+  service('telegram',t.status==='connected'?'Bot connected':t.status.replaceAll('_',' '),(t.chat_configured?'Chat configured':'Chat not confirmed')+' · last accepted alert '+age(d.last_alert_at),t.status==='connected'&&t.chat_configured?'ok':'warn');
+  $('consoleChecked').textContent='API checks '+new Date(d.checked_at*1000).toLocaleTimeString()+' · checked at most once/min';
+  $('consoleMetrics').textContent='Cellular data usage: unavailable · Database: '+d.database.replaceAll('_',' ')+' · Last location: '+age(d.last_location_at)+' · Observations since '+new Date(d.started_at*1000).toLocaleString();
+  chart('onlineChart',d.buckets,['online'],true);chart('eventChart',d.buckets,['webhook_received']);chart('pingChart',d.buckets,['ping_success','ping_failure']);chart('telegramChart',d.buckets,['telegram_success','telegram_failure','telegram_skipped']);
+  $('consoleLog').innerHTML=d.events.map(e=>'<div><span class="muted">'+esc(new Date(e.time*1000).toLocaleTimeString())+'</span> · '+esc(e.kind)+' · <span class="'+(e.outcome==='failure'?'bad':'')+'">'+esc(e.outcome)+'</span></div>').join('')||'No events observed yet. This console does not generate test alerts.';
+ }catch(e){
+  service('link','Connection lost',consoleLastSuccess?'Last response '+age(new Date(consoleLastSuccess)):'No response received','bad');
+  service('render','Unreachable','Cannot distinguish network loss from server downtime','warn');
+  for(const name of ['particle','telegram'])service(name,'Unknown','Backend unavailable; previous readings are stale','warn');
+  $('consoleChecked').textContent='Unable to refresh. Retrying automatically.';
+ }finally{consoleBusy=false}
+}
+refresh();setInterval(refresh,10000);refreshConsole();setInterval(()=>{if(!document.hidden)refreshConsole()},15000);
+
 </script>
 </body></html>

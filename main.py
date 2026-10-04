@@ -7,6 +7,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from monitoring import Monitor
+monitor = Monitor()
+
 app=FastAPI(title="Rick's Trackers")
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
 TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
@@ -587,6 +590,7 @@ def clear():
 @app.post("/api/particle/webhook")
 async def webhook(request:Request,authorization:Optional[str]=Header(default=None)):
     auth_webhook(authorization)
+    monitor.record("webhook", "received")
     webhook_received_at=datetime.now(timezone.utc).isoformat()
     raw=await request.json()
 
@@ -694,6 +698,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             print(f"Particle event ignored: event={event_name} payload_type={type(payload).__name__}")
             return {"ok":True,"ignored":"non-location or unsupported Particle event"}
 
+    monitor.record("location", "received")
     prev=state["external_power"]
     for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:
         v=getattr(x,k)
@@ -734,6 +739,40 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     if prev is True and x.external_power is False and state["mode"]!="off":
         alarm("External tracker power disconnected","power-loss")
     return {"ok":True,"lat":x.lat,"lon":x.lon,"speed_mph":round(x.speed_mph,1)}
+
+# Instrument existing calls so manual and automatic pings share the same counters.
+_original_location_request = request_fresh_location
+def request_fresh_location():
+    try:
+        result = _original_location_request()
+        monitor.record("ping", "success" if result.get("ok") else "failure")
+        return result
+    except Exception:
+        monitor.record("ping", "failure")
+        raise
+
+_original_send_alert = send_alert
+def send_alert(*args, **kwargs):
+    try:
+        result = _original_send_alert(*args, **kwargs)
+        monitor.record("telegram", "success" if result else "skipped")
+        return result
+    except Exception:
+        monitor.record("telegram", "failure")
+        raise
+
+@app.get("/api/homebase/console")
+def homebase_console():
+    monitor.check(requests.get, PARTICLE_ACCESS_TOKEN, PARTICLE_DEVICE_ID,
+                  TELEGRAM_BOT_TOKEN, state.get("telegram_chat_id"))
+    result = monitor.snapshot()
+    result["render"] = {"status": "responding", "uptime_sec": int(time.time()-monitor.started),
+                        "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7]}
+    result["last_location_at"] = state.get("last_seen")
+    result["last_alert_at"] = state.get("last_alert_at")
+    result["database"] = "ready" if _history_db_ready else "unavailable" if HISTORY_DATABASE_URL else "not_configured"
+    return result
+
 @app.on_event("startup")
 def startup_discover():
     history_init()
