@@ -2,7 +2,7 @@ import os, math, time, hmac, requests, threading
 import psycopg
 from datetime import datetime, timezone
 from typing import Literal, Optional
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -19,6 +19,9 @@ PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high"}
+
+state.update({"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
+_mode_change_lock=threading.Lock()
 
 _alarm_poll_thread=None
 _alarm_poll_thread_lock=threading.Lock()
@@ -316,6 +319,37 @@ def read_imu_motion():
         state["imu_pending"]=None
     return pending_motion or current_motion
 
+def refresh_control_status(force=False):
+    """Only acknowledged Particle configuration can confirm the requested mode."""
+    now=time.time()
+    if not force and now-state.get("_control_checked",0)<15:
+        return
+    state["_control_checked"]=now
+    try:
+        conf=get_particle_config().get("configuration") or {}
+        current=conf.get("current") or {}
+        pending=conf.get("pending") or {}
+        motion=(current.get("imu_trig") or {}).get("motion")
+        sleep=(current.get("sleep") or {}).get("mode")
+        state["tracker_sleep"]=sleep
+        state["tracker_update_interval_sec"]=(current.get("location") or {}).get("interval_max")
+        state["imu_sensitivity"]=motion
+        state["imu_pending"]=(pending.get("imu_trig") or {}).get("motion")
+        desired="disable" if state["mode"]!="armed" else state.get("_armed_motion_sensitivity","high")
+        minimum=60 if state["mode"]=="armed" else 3600
+        acknowledged=(sleep=="disable" and motion==desired and
+                      (current.get("location") or {}).get("interval_min")==minimum and
+                      (current.get("location") or {}).get("interval_max")==3600)
+        changing=any((pending.get(module) or {}).get(key,current.get(module,{}).get(key))!=value
+                     for module,key,value in (("sleep","mode","disable"),("imu_trig","motion",desired),("location","interval_min",minimum),("location","interval_max",3600)))
+        state["mode_status"]="confirmed" if acknowledged and not changing else "pending"
+        state["mode_message"]=("Tracker settings confirmed" if state["mode_status"]=="confirmed" else
+            "Waiting for tracker to connect and apply settings. A sleeping tracker wakes at its next hourly check-in.")
+    except Exception:
+        state["mode_status"]="unknown"
+        state["mode_message"]="Cannot confirm tracker settings. Check the connection and retry."
+
+
 def set_tracker_power_profile(mode):
     """Apply Particle-side power behavior for app modes without changing secrets or firmware."""
     doc=get_particle_config()
@@ -330,12 +364,12 @@ def set_tracker_power_profile(mode):
     updated.setdefault("imu_trig",{})
 
     if mode=="off":
-        # Battery-saver / travel-off: sleep between one-hour check-ins.
-        updated["sleep"]["mode"]="enable"
+        # Travel/off stops motion alarms but remains reachable for remote arming.
+        updated["sleep"]["mode"]="disable"
         updated["location"]["interval_min"]=3600
         updated["location"]["interval_max"]=3600
         updated["imu_trig"]["motion"]="disable"
-        sleep_state="enable"
+        sleep_state="disable"
         interval=3600
         motion="disable"
     elif mode=="armed":
@@ -349,21 +383,26 @@ def set_tracker_power_profile(mode):
         interval=updated["location"].get("interval_max")
         motion=desired
     else:
-        # Geofence mode keeps the existing Particle power profile for now.
-        return True
+        updated["sleep"]["mode"]="disable"
+        updated["imu_trig"]["motion"]="disable"
+        sleep_state="disable"
+        motion="disable"
+        interval=3600
 
+    updated["location"]["interval_min"]=60 if mode=="armed" else 3600
+    updated["location"]["interval_max"]=3600
+    updated["location"]["lock_trigger"]=False
     url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
     headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json","Content-Type":"application/json"}
     r=requests.put(url,headers=headers,json=updated,timeout=20)
     if not r.ok:
         raise HTTPException(r.status_code,f"Particle power-profile update failed: {r.text[:260]}")
 
-    state["tracker_sleep"]=sleep_state
-    state["tracker_update_interval_sec"]=interval
-    state["imu_sensitivity"]=motion
-    state["imu_pending"]=motion
+    state["mode_status"]="pending"
+    state["mode_message"]="Command submitted; waiting for the tracker to apply it."
+    state["_control_checked"]=0
     note("Tracker power profile",
-         "TRAVEL/OFF: low-power sleep, 60-minute check-in" if mode=="off"
+         "TRAVEL/OFF: connected, hourly location reports" if mode=="off"
          else f"ARMED: sleep disabled, motion detection {motion.upper()}")
     return True
 
@@ -411,9 +450,7 @@ def imu_sensitivity(x:ImuSensitivity):
 def status():
     telegram_ready()
     refresh_vitals()
-    if state.get("imu_sensitivity") is None:
-        try: read_imu_motion()
-        except Exception as e: print(f"Particle IMU read skipped: {e}")
+    refresh_control_status()
     return pub()
 
 @app.get("/api/homebase/history")
@@ -550,34 +587,37 @@ def ensure_alarm_poll_worker():
         )
         _alarm_poll_thread.start()
 
-@app.post("/api/trailer/mode")
-def setmode(x:Mode):
-    # Apply the tracker-side power/security profile first so the app mode
-    # reflects what Particle accepted (or queued for an offline device).
-    timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
-    if x.mode in ("off","armed"):
-        set_tracker_power_profile(x.mode)
+def ping_after_arm():
+    if state["mode"]=="armed" and state.get("mode_status")=="confirmed":
+        try: request_fresh_location()
+        except Exception: print("Initial arm location request failed")
 
+@app.post("/api/trailer/mode")
+def setmode(x:Mode, background_tasks:BackgroundTasks):
+    if not _mode_change_lock.acquire(blocking=False):
+        raise HTTPException(409,"A mode change is already being submitted. Please wait.")
     try:
-        save_selected_mode(x.mode)
-    except Exception:
-        raise HTTPException(503,"Tracker profile may have been accepted, but the selected mode could not be saved. Please retry.")
-    state["mode"]=x.mode
-    if x.mode=="off":
-        state["alarm"]=False;state["alarm_reason"]=None
-        state["_motion_started"]=None
-        note("Mode changed","off • tracker entering low-power sleep with 60-minute check-ins")
-        timeline("TRAVEL/OFF","Low-power sleep enabled • 60-minute check-ins",kind="mode")
-    elif x.mode=="armed":
-        timeline("ARM PROFILE SUBMITTED", "Particle accepted or queued the armed profile; this is not device confirmation", kind="mode")
-        fresh=request_fresh_location()
-        ok=bool(fresh.get("ok"))
-        note("Mode changed","armed • motion detection restored • fresh tracker location requested" if ok else "armed • motion restored • tracker ping failed")
-        sens=str(state.get("_armed_motion_sensitivity") or state.get("imu_sensitivity") or "high").upper()
-        timeline("ARMED",f"Sleep disabled • motion detection {sens} • fresh location requested" if ok else f"Sleep disabled • motion detection {sens} • tracker ping failed",kind="mode")
-    else:
-        note("Mode changed",x.mode)
-    return pub()
+        timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
+        set_tracker_power_profile(x.mode)
+        try:
+            save_selected_mode(x.mode)
+        except Exception:
+            raise HTTPException(503,"Tracker profile may have been accepted, but the selected mode could not be saved. Please retry.")
+        state["mode"]=x.mode
+        if x.mode=="off":
+            state["alarm"]=False
+            state["alarm_reason"]=None
+            state["_motion_started"]=None
+            state["_alarm_poll_next_at"]=None
+        refresh_control_status(force=True)
+        note("Mode changed",x.mode+" • "+state["mode_message"])
+        timeline("MODE CONFIRMED" if state["mode_status"]=="confirmed" else "MODE PENDING",
+                 x.mode.upper()+" • "+state["mode_message"],kind="mode")
+        if x.mode=="armed":
+            background_tasks.add_task(ping_after_arm)
+        return pub()
+    finally:
+        _mode_change_lock.release()
 @app.post("/api/trailer/geofence")
 def setgeo(x:Fence):
     state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
@@ -886,8 +926,9 @@ def startup_discover():
         print(f"Particle development-device verify ok={dev_ok}")
         if dev_ok:
             time.sleep(1)
-            motion=read_imu_motion()
-            print(f"Particle IMU motion sensitivity={motion}")
+            set_tracker_power_profile(state["mode"])
+            refresh_control_status(force=True)
+            print(f"Particle control status={state['mode_status']}")
     except Exception as e:
         print(f"Particle IMU setup exception: {e}")
 

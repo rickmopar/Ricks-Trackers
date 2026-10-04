@@ -20,7 +20,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 <div class="top"><div><div class="brand">Rick's Trackers</div><div class="small">Car Trailer</div></div><div style="text-align:right"><a href="/homebase" style="display:inline-block;background:#1f5f91;border:1px solid #4d9cff;color:#fff;font-weight:900;text-decoration:none;padding:10px 14px;border-radius:12px">OPEN HOME BASE</a><div class="small" id="conn" style="margin-top:6px">Connecting…</div></div></div>
 <div class="card"><div class="head"><div><div class="asset">Car Trailer</div><div class="small" id="sub">Waiting for tracker data</div></div><div class="pill off" id="pill">WAITING</div></div>
 <div class="modegrid"><button class="mode" id="marmed" onclick="mode('armed')">ARMED</button><button class="mode" id="mgeofence" onclick="mode('geofence')">GEOFENCE</button><button class="mode" id="moff" onclick="mode('off')">TRAVEL / OFF</button></div>
-<div class="banner" id="banner"></div><div id="mapwrap"><div id="map"></div><button type="button" class="mapbtn" onclick="centerMap()">CENTER MAP</button></div>
+<div class="small" id="controlStatus" role="status" style="margin-top:12px"></div><div class="banner" id="banner"></div><div id="mapwrap"><div id="map"></div><button type="button" class="mapbtn" onclick="centerMap()">CENTER MAP</button></div>
 <div class="grid">
 <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div><div class="stat"><div class="label">Speed</div><div class="value" id="speed">—</div></div>
 <div class="stat"><div class="label">Battery</div><div class="value" id="battery">—</div></div><div class="stat"><div class="label">External power</div><div class="value" id="power">—</div></div>
@@ -59,8 +59,9 @@ function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRA
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
 async function api(p,o={}){let r=await fetch(p,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o});if(!r.ok)throw Error((await r.text())||r.status);return r.json()}
 function render(s){latestState=s;$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
+$('controlStatus').textContent=modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings');
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));['low','medium','high'].forEach(x=>$('i'+x).classList.toggle('active',s.imu_sensitivity===x));
-let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
+let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
 if(map&&marker&&fence&&route&&typeof s.lat==='number'){marker.setLatLng([s.lat,s.lon]);let a=typeof s.home_lat==='number'?s.home_lat:s.lat,b=typeof s.home_lon==='number'?s.home_lon:s.lon;fence.setLatLng([a,b]).setRadius((s.geofence_ft||1000)*.3048);route.setLatLngs((s.route||[]).map(x=>[x.lat,x.lon]));map.setView([s.lat,s.lon],16)}
 $('timeline').innerHTML=(s.timeline||[]).slice(0,12).map(e=>'<div class="event"><div class="et">'+esc(e.stage)+'</div><div class="ed">'+esc(e.detail||'')+' • '+new Date(e.time).toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'})+'</div></div>').join('')||'No motion timeline yet.';
 $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>'<div class="event"><div class="et">'+esc(e.title)+'</div><div class="ed">'+esc(e.detail||'')+' • '+age(e.time)+'</div></div>').join('')||'No events yet.';
@@ -80,7 +81,16 @@ function centerMap(){
   map.fitBounds(bounds,{padding:[20,20]});
 }
 async function refresh(){try{render(await api('/api/trailer/status'))}catch(e){$('conn').textContent='Offline';$('sub').textContent=e.message}}
-async function mode(x){try{render(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));msg('Mode changed to '+label(x))}catch(e){msg(e.message,'red')}}
+let modeBusy=false;
+async function mode(x){
+ if(modeBusy)return;
+ modeBusy=true;
+ ['armed','geofence','off'].forEach(v=>$('m'+v).disabled=true);
+ $('controlStatus').textContent='Sending '+x.toUpperCase()+' command…';
+ try{const result=await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})});modeBusy=false;render(result)}
+ catch(e){$('controlStatus').textContent='Command failed: '+e.message}
+ finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=false)}
+}
 async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST',body:JSON.stringify({feet:x})}));msg('Geofence set to '+x+' ft')}catch(e){msg(e.message,'red')}}
 let imuBusy=false;
 async function imu(x){
