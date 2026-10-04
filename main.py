@@ -632,6 +632,8 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
                 if k in v and isinstance(v[k],(int,float,str)): return v[k]
         return None
 
+    report_time=None
+    report_source="payload timestamp"
     found=find_loc(payload)
     if found:
         loc,container=found
@@ -669,6 +671,8 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         event_time=container.get("time",container.get("timestamp"))
         device_event_time=iso_from_event_time(event_time)
         timestamp=published_at or device_event_time
+        report_time=device_event_time or published_at
+        report_source="tracker timestamp" if device_event_time else "Particle publish timestamp (tracker time unavailable)"
 
         lock=loc.get("lck",loc.get("lock",loc.get("fix",True)))
         x=Event(
@@ -702,8 +706,8 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             print(f"Particle event ignored: event={event_name} payload_type={type(payload).__name__}")
             return {"ok":True,"ignored":"non-location or unsupported Particle event"}
 
-    if x.timestamp:
-        timeline("GPS LOCATION REPORTED" if x.gps_fix else "LOCATION REPORTED", f"{x.lat:.6f}, {x.lon:.6f} • tracker report timestamp; not a matched ping response", x.timestamp, "location")
+    if report_time or x.timestamp:
+        timeline("GPS LOCATION REPORTED" if x.gps_fix else "LOCATION REPORTED", f"{x.lat:.6f}, {x.lon:.6f} • {report_source}; not a matched ping response", report_time or x.timestamp, "location")
     timeline("LOCATION RECEIVED", f"{x.lat:.6f}, {x.lon:.6f} • server receipt", webhook_received_at, "server")
     monitor.record("location", "received")
     prev=state["external_power"]
