@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high"}
 
 _alarm_poll_thread=None
 _alarm_poll_thread_lock=threading.Lock()
@@ -339,12 +339,15 @@ def set_tracker_power_profile(mode):
         interval=3600
         motion="disable"
     elif mode=="armed":
-        # Security mode: keep the tracker reachable and restore motion detection.
+        # Security mode: keep the tracker reachable and restore the user's armed sensitivity.
+        desired=state.get("_armed_motion_sensitivity")
+        if desired not in ("low","medium","high"):
+            desired="high"
         updated["sleep"]["mode"]="disable"
-        updated["imu_trig"]["motion"]="medium"
+        updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
         interval=updated["location"].get("interval_max")
-        motion="medium"
+        motion=desired
     else:
         # Geofence mode keeps the existing Particle power profile for now.
         return True
@@ -361,7 +364,7 @@ def set_tracker_power_profile(mode):
     state["imu_pending"]=motion
     note("Tracker power profile",
          "TRAVEL/OFF: low-power sleep, 60-minute check-in" if mode=="off"
-         else "ARMED: sleep disabled, motion detection MEDIUM")
+         else f"ARMED: sleep disabled, motion detection {motion.upper()}")
     return True
 
 def set_imu_motion(sensitivity):
@@ -377,6 +380,7 @@ def set_imu_motion(sensitivity):
     r=requests.put(url,headers=headers,json=updated,timeout=20)
     if not r.ok:
         raise HTTPException(r.status_code,f"Particle IMU update failed: {r.text[:260]}")
+    state["_armed_motion_sensitivity"]=sensitivity
     state["imu_sensitivity"]=sensitivity
     state["imu_pending"]=sensitivity
     time.sleep(1)
@@ -569,7 +573,8 @@ def setmode(x:Mode):
         fresh=request_fresh_location()
         ok=bool(fresh.get("ok"))
         note("Mode changed","armed • motion detection restored • fresh tracker location requested" if ok else "armed • motion restored • tracker ping failed")
-        timeline("ARMED","Sleep disabled • motion detection MEDIUM • fresh location requested" if ok else "Sleep disabled • motion detection MEDIUM • tracker ping failed",kind="mode")
+        sens=str(state.get("_armed_motion_sensitivity") or state.get("imu_sensitivity") or "high").upper()
+        timeline("ARMED",f"Sleep disabled • motion detection {sens} • fresh location requested" if ok else f"Sleep disabled • motion detection {sens} • tracker ping failed",kind="mode")
     else:
         note("Mode changed",x.mode)
     return pub()
@@ -660,9 +665,59 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
                 if k in v and isinstance(v[k],(int,float,str)): return v[k]
         return None
 
+    # Firmware-tolerant motion detection. Newer Tracker firmware may publish
+    # movement as a separate event without coordinates, or move the trigger
+    # deeper in the payload. Collect motion markers recursively instead of
+    # requiring a location object to contain trig/trigger.
+    def motion_markers(obj):
+        out=[]
+        if isinstance(obj,dict):
+            for k,v in obj.items():
+                kl=str(k).lower()
+                if kl in ("trig","trigger","triggers","reason","event","event_name","type","name"):
+                    if isinstance(v,str):
+                        out.append(v.lower())
+                    elif isinstance(v,list):
+                        out.extend(str(x).lower() for x in v if isinstance(x,(str,int,float)))
+                    elif isinstance(v,(int,float)):
+                        out.append(str(v).lower())
+                out.extend(motion_markers(v))
+        elif isinstance(obj,list):
+            for v in obj:
+                out.extend(motion_markers(v))
+        return out
+
+    markers=motion_markers(payload)
+    if isinstance(raw,dict) and raw.get("event"):
+        markers.append(str(raw.get("event")).lower())
+    motion_event=any(
+        m=="imu_m" or m.startswith("imu_") or "motion" in m or
+        m in ("move","movement","moving")
+        for m in markers
+    )
+
     report_time=None
     report_source="payload timestamp"
     found=find_loc(payload)
+
+    # A motion-only Particle event is enough to trip ARMED mode immediately.
+    # Do not wait for GPS; the alarm worker will begin requesting fresh location.
+    if motion_event and not found:
+        event_name=raw.get("event") if isinstance(raw,dict) else None
+        published_at=raw.get("published_at") if isinstance(raw,dict) else None
+        state["_last_motion_device_time"]=None
+        state["_last_motion_published_at"]=published_at
+        state["_last_motion_webhook_at"]=webhook_received_at
+        detail="Tracker reported motion"
+        if event_name:
+            detail+=f" • event={event_name}"
+        if markers:
+            detail+=" • markers="+", ".join(dict.fromkeys(markers))
+        timeline("DEVICE MOTION EVENT",detail,published_at or webhook_received_at,"motion")
+        print(f"Particle motion-only event={event_name} markers={markers} mode={state['mode']}")
+        if state["mode"]=="armed":
+            alarm("Movement detected by Tracker One","movement")
+        return {"ok":True,"motion":True,"alarm":bool(state.get("alarm"))}
     if found:
         loc,container=found
         lat=loc.get("lat",loc.get("latitude"))
@@ -689,8 +744,8 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         if isinstance(trig,str): triggers=[trig.lower()]
         elif isinstance(trig,list): triggers=[str(t).lower() for t in trig]
         else: triggers=[]
-        imu_motion=any(
-            t=="imu_m" or t.startswith("imu_") or "motion" in t or t in ("move","movement")
+        imu_motion=motion_event or any(
+            t=="imu_m" or t.startswith("imu_") or "motion" in t or t in ("move","movement","moving")
             for t in triggers
         )
         print(f"Particle loc triggers={triggers} imu_motion={imu_motion} mode={state['mode']}")
