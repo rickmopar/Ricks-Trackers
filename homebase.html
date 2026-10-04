@@ -86,6 +86,7 @@
       <button class="danger" onclick="clearAlarm()">CLEAR ALARM</button>
     </div>
     <div id="map"></div>
+    <div class="actions"><button onclick="centerTracker()">CENTER ON TRACKER</button><button onclick="showRoute()">SHOW HISTORY ROUTE</button></div>
     <div style="margin-top:12px"><a id="googleLocation" target="_blank" rel="noopener noreferrer" hidden style="display:inline-block;padding:12px;border:1px solid #31445f;border-radius:12px;font-weight:700">View location in Google Maps</a><span id="googleLocationWaiting" class="small">Waiting for a GPS location</span></div>
     <div class="stats">
       <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div>
@@ -119,10 +120,13 @@ const googleLink=$('googleLocation');googleLink.hidden=!hasLocation;googleLink.s
 if(hasLocation)googleLink.href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(s.lat+','+s.lon);else googleLink.removeAttribute('href');
 $('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===true?'Locked':s.gps_fix===false?'No fix':'—';$('telegram').textContent=s.telegram_configured?'READY':'—';$('mode').textContent=modeLabel(s.mode);$('geo').textContent=(s.geofence_ft||'—')+' ft';$('imu').textContent=(s.imu_sensitivity||'—').toUpperCase();$('alarm').textContent=s.alarm?(s.alarm_reason||'ACTIVE'):'Clear';$('lastalert').textContent=age(s.last_alert_at);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode==='off'?'OFF':'SECURE';p.className='pill '+(s.alarm?'alarm':s.mode==='off'?'off':'secure');
-if(map&&typeof s.lat==='number'){if(!marker)marker=L.marker([s.lat,s.lon]).addTo(map);else marker.setLatLng([s.lat,s.lon]);map.setView([s.lat,s.lon],15)}}
+if(map&&hasLocation){if(!marker){marker=L.marker([s.lat,s.lon]).addTo(map);map.setView([s.lat,s.lon],15)}else marker.setLatLng([s.lat,s.lon])}}
+function centerTracker(){if(map&&marker)map.setView(marker.getLatLng(),15)}
+function showRoute(){if(map&&path&&path.getLatLngs().length)map.fitBounds(path.getBounds(),{padding:[20,20],maxZoom:16})}
 function renderHistory(d){$('dbstate').textContent=d.persistent?'Persistent history connected • '+d.count+' records shown':(d.error||'History database not connected');$('dbstate').className='small '+(d.persistent?'dbgood':'dbbad');const items=d.items||[];$('historyrows').innerHTML=items.map(x=>'<div class="row" data-lat="'+(x.lat??'')+'" data-lon="'+(x.lon??'')+'"><div>'+esc(new Date(x.event_time||x.created_at).toLocaleString())+'</div><div class="muted">'+esc((x.category||'').toUpperCase())+'</div><div><div class="title">'+esc(x.title)+'</div><div class="muted">'+esc(x.detail||'')+'</div></div><div>'+((x.speed_mph==null)?'—':Math.round(x.speed_mph)+' mph')+'</div><div>'+((x.battery_percent==null)?'—':x.battery_percent+'%')+'</div></div>').join('')||'<div class="small" style="padding:16px">No history yet.</div>';
-const pts=items.filter(x=>typeof x.lat==='number'&&typeof x.lon==='number').reverse().map(x=>[x.lat,x.lon]);if(path&&pts.length){path.setLatLngs(pts);if(pts.length>1)map.fitBounds(path.getBounds(),{padding:[20,20]})}}
-async function refresh(){try{renderLive(await api('/api/trailer/status'));const h=await api('/api/homebase/history?hours='+hours+'&limit=5000');renderHistory(h)}catch(e){$('conn').textContent='Offline'}}
+const pts=items.filter(x=>typeof x.lat==='number'&&typeof x.lon==='number').reverse().map(x=>[x.lat,x.lon]);if(path)path.setLatLngs(pts)}
+let refreshBusy=false;
+async function refresh(){if(refreshBusy)return;refreshBusy=true;const requestedHours=hours;try{renderLive(await api('/api/trailer/status'));const h=await api('/api/homebase/history?hours='+requestedHours+'&limit=5000');if(hours===requestedHours)renderHistory(h)}catch(e){$('conn').textContent='Offline'}finally{refreshBusy=false;if(hours!==requestedHours)refresh()}}
 function setHours(h){hours=h;[24,168,720,0].forEach(x=>$('f'+x).classList.toggle('active',x===h));refresh()}
 async function mode(x){try{renderLive(await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})}));setTimeout(refresh,1000)}catch(e){alert(e.message)}}
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
