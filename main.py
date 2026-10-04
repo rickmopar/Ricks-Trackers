@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 app=FastAPI(title="Rick's Trackers")
@@ -755,5 +756,12 @@ def shutdown_alarm_poll_worker():
     _alarm_poll_stop.set()
     _alarm_poll_wake.set()
 
+@app.get("/homebase")
+def homebase_page():
+    return FileResponse("homebase.html")
+
+@app.get("/homebase/")
+def homebase_page_slash():
+    return FileResponse("homebase.html")
 
 app.mount("/",StaticFiles(directory=".",html=True),name="static")
