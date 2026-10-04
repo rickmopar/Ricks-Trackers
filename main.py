@@ -20,7 +20,7 @@ PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high"}
 
-state.update({"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
+state.update({"tasking_state":"ready","readiness":"checking","readiness_message":"Checking tracker readiness","device_online":None,"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
 _mode_change_lock=threading.Lock()
 
 _alarm_poll_thread=None
@@ -28,6 +28,7 @@ _alarm_poll_thread_lock=threading.Lock()
 _alarm_poll_wake=threading.Event()
 _alarm_poll_stop=threading.Event()
 
+class Tasking(BaseModel): action:Literal["startup","storage"]
 class Mode(BaseModel): mode:Literal["armed","geofence","off"]
 class Fence(BaseModel): feet:Literal[100,500,1000]
 class Live(BaseModel): enabled:bool
@@ -73,6 +74,7 @@ def history_init():
                 cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_created_at_idx ON tracker_history(created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_category_idx ON tracker_history(category)")
                 cur.execute("CREATE TABLE IF NOT EXISTS tracker_settings (id INTEGER PRIMARY KEY CHECK (id=1), mode TEXT NOT NULL CHECK (mode IN ('off','armed','geofence')))")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS tasking_state TEXT NOT NULL DEFAULT 'ready'")
         _history_db_ready=True
         _history_db_error=None
         return True
@@ -108,18 +110,18 @@ def history_record(category,title,detail="",event_time=None,lat=None,lon=None,
         print(f"History write failed: {e}")
         return False
 
-def save_selected_mode(mode):
+def save_selected_mode(mode,tasking_state=None):
     # A successful mode change must survive server restarts.
     with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode",(mode,))
+            cur.execute("INSERT INTO tracker_settings (id,mode,tasking_state) VALUES (1,%s,%s) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode,tasking_state=EXCLUDED.tasking_state",(mode,tasking_state or state["tasking_state"]))
 
 def restore_selected_mode():
     if not _history_db_ready:
         raise RuntimeError("Cannot safely restore tracker mode: database unavailable")
     with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT mode FROM tracker_settings WHERE id=1")
+            cur.execute("SELECT mode,tasking_state FROM tracker_settings WHERE id=1")
             row=cur.fetchone()
             if not row:
                 # Migrate the last explicit user selection, never a server-start default.
@@ -130,6 +132,8 @@ def restore_selected_mode():
                 raise RuntimeError("Saved tracker mode is invalid")
             cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",(restored,))
     state["mode"]=restored
+    state["tasking_state"]=row[1] if row and len(row)>1 and row[1] in ("ready","storage") else "ready"
+    if state["tasking_state"]=="storage": state["mode"]="off"
 
 def refresh_vitals(force=False):
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
@@ -337,20 +341,40 @@ def refresh_control_status(force=False):
         state["imu_pending"]=(pending.get("imu_trig") or {}).get("motion")
         desired="disable" if state["mode"]!="armed" else state.get("_armed_motion_sensitivity","high")
         minimum=60 if state["mode"]=="armed" else 3600
-        acknowledged=(sleep=="disable" and motion==desired and
+        desired_sleep="enable" if state["tasking_state"]=="storage" else "disable"
+        acknowledged=(sleep==desired_sleep and motion==desired and
                       (current.get("location") or {}).get("interval_min")==minimum and
                       (current.get("location") or {}).get("interval_max")==3600)
         changing=any((pending.get(module) or {}).get(key,current.get(module,{}).get(key))!=value
-                     for module,key,value in (("sleep","mode","disable"),("imu_trig","motion",desired),("location","interval_min",minimum),("location","interval_max",3600)))
+                     for module,key,value in (("sleep","mode",desired_sleep),("imu_trig","motion",desired),("location","interval_min",minimum),("location","interval_max",3600)))
+        result=requests.get(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}",
+                            headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"},timeout=10)
+        result.raise_for_status()
+        state["device_online"]=result.json().get("connected") is True
         state["mode_status"]="confirmed" if acknowledged and not changing else "pending"
+        previous=state.get("readiness")
+        if state["tasking_state"]=="storage":
+            state["readiness"]="storage" if acknowledged and not changing else "storage_pending"
+            state["readiness_message"]=("Storage sleep enabled. Checks in hourly. Press START UP before your next outing." if state["readiness"]=="storage" else "Storage requested. Waiting for tracker confirmation.")
+        elif sleep=="disable" and (pending.get("sleep") or {}).get("mode","disable")=="disable" and state["device_online"]:
+            state["readiness"]="ready"
+            state["readiness_message"]="Tracker confirmed ready for tasking. It stays connected until you select STORAGE / SLEEP."
+        else:
+            state["readiness"]="startup_pending"
+            state["readiness_message"]="Startup pending. Waiting for the tracker to connect and confirm it will stay awake; allow up to an hour, plus connection time."
+        if state["readiness"]=="ready" and previous!="ready":
+            timeline("READY FOR TASKING","Particle confirms tracker online and awake settings applied",kind="mode")
         state["mode_message"]=("Tracker settings confirmed" if state["mode_status"]=="confirmed" else
             "Waiting for tracker to connect and apply settings. A sleeping tracker wakes at its next hourly check-in.")
     except Exception:
+        state["readiness"]="checking"
+        state["device_online"]=None
+        state["readiness_message"]="Readiness cannot be confirmed. Checking the tracker connection."
         state["mode_status"]="unknown"
         state["mode_message"]="Cannot confirm tracker settings. Check the connection and retry."
 
 
-def set_tracker_power_profile(mode):
+def set_tracker_power_profile(mode,tasking_state=None):
     """Apply Particle-side power behavior for app modes without changing secrets or firmware."""
     doc=get_particle_config()
     conf=doc.get("configuration") or {}
@@ -389,6 +413,9 @@ def set_tracker_power_profile(mode):
         motion="disable"
         interval=3600
 
+    if (tasking_state or state["tasking_state"])=="storage":
+        updated["sleep"]["mode"]="enable"
+        updated["imu_trig"]["motion"]="disable"
     updated["location"]["interval_min"]=60 if mode=="armed" else 3600
     updated["location"]["interval_max"]=3600
     updated["location"]["lock_trigger"]=False
@@ -401,9 +428,8 @@ def set_tracker_power_profile(mode):
     state["mode_status"]="pending"
     state["mode_message"]="Command submitted; waiting for the tracker to apply it."
     state["_control_checked"]=0
-    note("Tracker power profile",
-         "TRAVEL/OFF: connected, hourly location reports" if mode=="off"
-         else f"ARMED: sleep disabled, motion detection {motion.upper()}")
+    note("Tracker power profile", "STORAGE: hourly wake-ups" if updated["sleep"]["mode"]=="enable" else
+         f"{mode.upper()}: stays connected, hourly routine reports")
     return True
 
 def set_imu_motion(sensitivity):
@@ -592,11 +618,39 @@ def ping_after_arm():
         try: request_fresh_location()
         except Exception: print("Initial arm location request failed")
 
+@app.post("/api/trailer/tasking")
+def tasking(x:Tasking):
+    if not _mode_change_lock.acquire(blocking=False):
+        raise HTTPException(409,"Another command is being submitted. Please wait.")
+    try:
+        target="ready" if x.action=="startup" else "storage"
+        # Repeated Startup must never disarm an already active tracker.
+        selected=state["mode"] if target=="ready" else "off"
+        set_tracker_power_profile(selected,target)
+        save_selected_mode(selected,target)
+        state["tasking_state"]=target
+        state["mode"]=selected
+        if target=="storage":
+            state["alarm"]=False
+            state["alarm_reason"]=None
+            state["_motion_started"]=None
+            state["_alarm_poll_next_at"]=None
+        state["readiness"]="startup_pending" if target=="ready" else "storage_pending"
+        timeline("STARTUP REQUESTED" if target=="ready" else "STORAGE REQUESTED",
+                 "Remain awake for tasking" if target=="ready" else "Alarms off; hourly sleep check-ins",kind="mode")
+        refresh_control_status(force=True)
+        return pub()
+    finally:
+        _mode_change_lock.release()
+
 @app.post("/api/trailer/mode")
 def setmode(x:Mode, background_tasks:BackgroundTasks):
     if not _mode_change_lock.acquire(blocking=False):
         raise HTTPException(409,"A mode change is already being submitted. Please wait.")
     try:
+        refresh_control_status(force=True)
+        if x.mode in ("armed","geofence") and state.get("readiness")!="ready":
+            raise HTTPException(409,"Press START UP and wait for READY FOR TASKING before arming or selecting geofence.")
         timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
         set_tracker_power_profile(x.mode)
         try:

@@ -78,7 +78,7 @@
       <div><div style="font-size:22px;font-weight:900">Car Trailer</div><div id="sub" class="small">Waiting for tracker data</div></div>
       <div id="pill" class="pill off">WAITING</div>
     </div>
-    <div class="modegrid">
+    <div class="card" style="margin-top:12px"><b id="readyLabel">CHECKING TRACKER</b><div id="readyDetail" class="small" role="status" style="margin-top:8px">Waiting for tracker confirmation</div><div class="actions"><button id="startupBtn" onclick="tasking('startup')">START UP / READY</button><button id="storageBtn" onclick="tasking('storage')">STORAGE / SLEEP</button></div><div class="small" style="margin-top:8px">Storage turns alarms off and checks in hourly. Startup keeps the tracker connected until you choose Storage again.</div></div><div class="modegrid">
       <button id="marmed" onclick="mode('armed')">ARMED</button>
       <button id="mgeofence" onclick="mode('geofence')">GEOFENCE</button>
       <button id="moff" onclick="mode('off')">TRAVEL / OFF</button>
@@ -119,6 +119,11 @@ const hasLocation=Number.isFinite(s.lat)&&Number.isFinite(s.lon)&&Math.abs(s.lat
 const googleLink=$('googleLocation');googleLink.hidden=!hasLocation;googleLink.style.display=hasLocation?'inline-block':'none';$('googleLocationWaiting').hidden=hasLocation;
 if(hasLocation)googleLink.href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(s.lat+','+s.lon);else googleLink.removeAttribute('href');
 $('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===true?'Locked':s.gps_fix===false?'No fix':'—';$('telegram').textContent=s.telegram_configured?'READY':'—';$('mode').textContent=modeLabel(s.mode);$('geo').textContent=(s.geofence_ft||'—')+' ft';$('imu').textContent=(s.imu_sensitivity||'—').toUpperCase();$('alarm').textContent=s.alarm?(s.alarm_reason||'ACTIVE'):'Clear';$('lastalert').textContent=age(s.last_alert_at);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
+latestReadiness=s.readiness;
+const readinessNames={ready:'READY FOR TASKING',startup_pending:'STARTUP PENDING',storage:'STORAGE / HOURLY SLEEP',storage_pending:'STORAGE PENDING',checking:'CHECKING TRACKER'};
+$('readyLabel').textContent=readinessNames[s.readiness]||'CHECKING TRACKER';
+$('readyDetail').textContent=s.readiness_message||'Waiting for tracker confirmation';
+['armed','geofence'].forEach(v=>$('m'+v).disabled=modeBusy||s.readiness!=='ready');
 $('controlStatus').textContent=modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings');
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
 if(map&&hasLocation){if(!marker){marker=L.marker([s.lat,s.lon]).addTo(map);map.setView([s.lat,s.lon],15)}else marker.setLatLng([s.lat,s.lon])}}
@@ -129,7 +134,18 @@ const pts=items.filter(x=>typeof x.lat==='number'&&typeof x.lon==='number').reve
 let refreshBusy=false;
 async function refresh(){if(refreshBusy)return;refreshBusy=true;const requestedHours=hours;try{renderLive(await api('/api/trailer/status'));const h=await api('/api/homebase/history?hours='+requestedHours+'&limit=5000');if(hours===requestedHours)renderHistory(h)}catch(e){$('conn').textContent='Offline'}finally{refreshBusy=false;if(hours!==requestedHours)refresh()}}
 function setHours(h){hours=h;[24,168,720,0].forEach(x=>$('f'+x).classList.toggle('active',x===h));refresh()}
-let modeBusy=false;
+let modeBusy=false,latestReadiness=null;
+async function tasking(action){
+ if(modeBusy)return;
+ if(action==='storage'&&!confirm('Turn off alarms and put the tracker in storage sleep with hourly check-ins?'))return;
+ modeBusy=true;
+ $('startupBtn').disabled=true;$('storageBtn').disabled=true;
+ ['armed','geofence','off'].forEach(v=>$('m'+v).disabled=true);
+ $('readyDetail').textContent=action==='startup'?'Submitting startup request…':'Submitting storage request…';
+ try{const result=await api('/api/trailer/tasking',{method:'POST',body:JSON.stringify({action})});modeBusy=false;renderLive(result)}
+ catch(e){$('readyDetail').textContent='Request failed: '+e.message}
+ finally{modeBusy=false;$('startupBtn').disabled=false;$('storageBtn').disabled=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
+}
 async function mode(x){
  if(modeBusy)return;
  modeBusy=true;
@@ -137,7 +153,7 @@ async function mode(x){
  $('controlStatus').textContent='Sending '+x.toUpperCase()+' command…';
  try{const result=await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})});modeBusy=false;renderLive(result)}
  catch(e){$('controlStatus').textContent='Command failed: '+e.message}
- finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=false)}
+ finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
 }
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
 async function clearAlarm(){try{renderLive(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));setTimeout(refresh,500)}catch(e){alert(e.message)}}

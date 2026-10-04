@@ -19,7 +19,7 @@ button{border:1px solid #31445f;background:#162338;color:#e7eef8;border-radius:1
 </style></head><body><div class="app">
 <div class="top"><div><div class="brand">Rick's Trackers</div><div class="small">Car Trailer</div></div><div style="text-align:right"><a href="/homebase" style="display:inline-block;background:#1f5f91;border:1px solid #4d9cff;color:#fff;font-weight:900;text-decoration:none;padding:10px 14px;border-radius:12px">OPEN HOME BASE</a><div class="small" id="conn" style="margin-top:6px">Connecting…</div></div></div>
 <div class="card"><div class="head"><div><div class="asset">Car Trailer</div><div class="small" id="sub">Waiting for tracker data</div></div><div class="pill off" id="pill">WAITING</div></div>
-<div class="modegrid"><button class="mode" id="marmed" onclick="mode('armed')">ARMED</button><button class="mode" id="mgeofence" onclick="mode('geofence')">GEOFENCE</button><button class="mode" id="moff" onclick="mode('off')">TRAVEL / OFF</button></div>
+<div class="card" style="margin-top:12px"><b id="readyLabel">CHECKING TRACKER</b><div id="readyDetail" class="small" role="status" style="margin-top:8px">Waiting for tracker confirmation</div><div class="actions"><button id="startupBtn" onclick="tasking('startup')">START UP / READY</button><button id="storageBtn" onclick="tasking('storage')">STORAGE / SLEEP</button></div><div class="small" style="margin-top:8px">Storage turns alarms off and checks in hourly. Startup keeps the tracker connected until you choose Storage again.</div></div><div class="modegrid"><button class="mode" id="marmed" onclick="mode('armed')">ARMED</button><button class="mode" id="mgeofence" onclick="mode('geofence')">GEOFENCE</button><button class="mode" id="moff" onclick="mode('off')">TRAVEL / OFF</button></div>
 <div class="small" id="controlStatus" role="status" style="margin-top:12px"></div><div class="banner" id="banner"></div><div id="mapwrap"><div id="map"></div><button type="button" class="mapbtn" onclick="centerMap()">CENTER MAP</button></div>
 <div class="grid">
 <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div><div class="stat"><div class="label">Speed</div><div class="value" id="speed">—</div></div>
@@ -59,6 +59,11 @@ function label(m){return m==='armed'?'ARMED':m==='geofence'?'GEOFENCE ONLY':'TRA
 function msg(t,c='green'){let b=$('banner');b.textContent=t;b.className='banner show '+c;setTimeout(()=>b.className='banner',4500)}
 async function api(p,o={}){let r=await fetch(p,{headers:{'Content-Type':'application/json',...(o.headers||{})},...o});if(!r.ok)throw Error((await r.text())||r.status);return r.json()}
 function render(s){latestState=s;$('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===false?'No fix':s.gps_fix===true?'Locked':'—';$('sms').textContent=s.telegram_configured?'READY':'PRESS START';$('lastsms').textContent=age(s.last_alert_at);$('mode').textContent=label(s.mode);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
+latestReadiness=s.readiness;
+const readinessNames={ready:'READY FOR TASKING',startup_pending:'STARTUP PENDING',storage:'STORAGE / HOURLY SLEEP',storage_pending:'STORAGE PENDING',checking:'CHECKING TRACKER'};
+$('readyLabel').textContent=readinessNames[s.readiness]||'CHECKING TRACKER';
+$('readyDetail').textContent=s.readiness_message||'Waiting for tracker confirmation';
+['armed','geofence'].forEach(v=>$('m'+v).disabled=modeBusy||s.readiness!=='ready');
 $('controlStatus').textContent=modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings');
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));[100,500,1000].forEach(x=>$('g'+x).classList.toggle('active',Number(s.geofence_ft)===x));['low','medium','high'].forEach(x=>$('i'+x).classList.toggle('active',s.imu_sensitivity===x));
 let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
@@ -81,7 +86,18 @@ function centerMap(){
   map.fitBounds(bounds,{padding:[20,20]});
 }
 async function refresh(){try{render(await api('/api/trailer/status'))}catch(e){$('conn').textContent='Offline';$('sub').textContent=e.message}}
-let modeBusy=false;
+let modeBusy=false,latestReadiness=null;
+async function tasking(action){
+ if(modeBusy)return;
+ if(action==='storage'&&!confirm('Turn off alarms and put the tracker in storage sleep with hourly check-ins?'))return;
+ modeBusy=true;
+ $('startupBtn').disabled=true;$('storageBtn').disabled=true;
+ ['armed','geofence','off'].forEach(v=>$('m'+v).disabled=true);
+ $('readyDetail').textContent=action==='startup'?'Submitting startup request…':'Submitting storage request…';
+ try{const result=await api('/api/trailer/tasking',{method:'POST',body:JSON.stringify({action})});modeBusy=false;render(result)}
+ catch(e){$('readyDetail').textContent='Request failed: '+e.message}
+ finally{modeBusy=false;$('startupBtn').disabled=false;$('storageBtn').disabled=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
+}
 async function mode(x){
  if(modeBusy)return;
  modeBusy=true;
@@ -89,7 +105,7 @@ async function mode(x){
  $('controlStatus').textContent='Sending '+x.toUpperCase()+' command…';
  try{const result=await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})});modeBusy=false;render(result)}
  catch(e){$('controlStatus').textContent='Command failed: '+e.message}
- finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=false)}
+ finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
 }
 async function geo(x){try{render(await api('/api/trailer/geofence',{method:'POST',body:JSON.stringify({feet:x})}));msg('Geofence set to '+x+' ft')}catch(e){msg(e.message,'red')}}
 let imuBusy=false;

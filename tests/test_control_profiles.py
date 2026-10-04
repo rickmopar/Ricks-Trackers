@@ -15,13 +15,14 @@ class ControlTests(unittest.TestCase):
         self.config={'sleep':{'mode':'enable'},'location':{'interval_min':3600,'interval_max':3600,'lock_trigger':True},'imu_trig':{'motion':'disable'},'geofence':{'zone1':{'enable':False}}}
         self.pending={}
         self.sent=[]
+        self.online=True
         def put(*args,**kwargs):
             self.sent.append(kwargs['json'])
             return SimpleNamespace(ok=True)
-        self.env={'state':{'mode':'off','_armed_motion_sensitivity':'high'},'time':SimpleNamespace(time=lambda:100),
+        self.env={'state':{'mode':'off','tasking_state':'ready','_armed_motion_sensitivity':'high'},'time':SimpleNamespace(time=lambda:100),
                   'get_particle_config':lambda:{'configuration':{'current':copy.deepcopy(self.config),'pending':copy.deepcopy(self.pending)}},
-                  'requests':SimpleNamespace(models=SimpleNamespace(complexjson=json),put=put),
-                  'PARTICLE_DEVICE_ID':'test','PARTICLE_ACCESS_TOKEN':'test','note':lambda *args:None}
+                  'requests':SimpleNamespace(models=SimpleNamespace(complexjson=json),put=put,get=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{"connected":self.online})),
+                  'PARTICLE_DEVICE_ID':'test','PARTICLE_ACCESS_TOKEN':'test','note':lambda *args:None,'timeline':lambda *a,**k:None}
         exec(compile(ast.Module(body=functions,type_ignores=[]),str(SOURCE),'exec'),self.env)
     def refresh(self):
         self.env['refresh_control_status'](force=True)
@@ -54,5 +55,30 @@ class ControlTests(unittest.TestCase):
     def test_cloud_failure_never_confirms_armed(self):
         self.env['get_particle_config']=lambda:(_ for _ in ()).throw(RuntimeError('offline'))
         self.assertEqual(self.refresh(),'unknown')
+
+    def test_storage_uses_hourly_sleep_and_never_ready(self):
+        self.env['state']['tasking_state']='storage'
+        self.env['set_tracker_power_profile']('off')
+        self.config=self.sent[-1]
+        self.assertEqual(self.config['sleep']['mode'],'enable')
+        self.assertEqual(self.config['location']['interval_min'],3600)
+        self.assertEqual(self.refresh(),'confirmed')
+        self.assertEqual(self.env['state']['readiness'],'storage')
+    def test_cloud_queue_is_not_device_ready(self):
+        self.env['set_tracker_power_profile']('off','ready')
+        self.pending=self.sent[-1]
+        self.online=False
+        self.refresh()
+        self.assertEqual(self.env['state']['readiness'],'startup_pending')
+        self.config=self.pending;self.pending={}
+        self.refresh()
+        self.assertEqual(self.env['state']['readiness'],'startup_pending')
+        self.online=True
+        self.refresh()
+        self.assertEqual(self.env['state']['readiness'],'ready')
+    def test_explicit_startup_overrides_storage(self):
+        self.env['state']['tasking_state']='storage'
+        self.env['set_tracker_power_profile']('off','ready')
+        self.assertEqual(self.sent[-1]['sleep']['mode'],'disable')
 
 if __name__=='__main__':unittest.main()
