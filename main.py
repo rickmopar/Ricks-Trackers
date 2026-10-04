@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"armed","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None}
 
 _alarm_poll_thread=None
 _alarm_poll_thread_lock=threading.Lock()
@@ -69,6 +69,7 @@ def history_init():
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_created_at_idx ON tracker_history(created_at DESC)")
                 cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_category_idx ON tracker_history(category)")
+                cur.execute("CREATE TABLE IF NOT EXISTS tracker_settings (id INTEGER PRIMARY KEY CHECK (id=1), mode TEXT NOT NULL CHECK (mode IN ('off','armed','geofence')))")
         _history_db_ready=True
         _history_db_error=None
         return True
@@ -103,6 +104,29 @@ def history_record(category,title,detail="",event_time=None,lat=None,lon=None,
         _history_db_error=str(e)
         print(f"History write failed: {e}")
         return False
+
+def save_selected_mode(mode):
+    # A successful mode change must survive server restarts.
+    with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode",(mode,))
+
+def restore_selected_mode():
+    if not _history_db_ready:
+        raise RuntimeError("Cannot safely restore tracker mode: database unavailable")
+    with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT mode FROM tracker_settings WHERE id=1")
+            row=cur.fetchone()
+            if not row:
+                # Migrate the last explicit user selection, never a server-start default.
+                cur.execute("SELECT mode FROM tracker_history WHERE title='Mode changed' AND mode IN ('off','armed','geofence') ORDER BY id DESC LIMIT 1")
+                row=cur.fetchone()
+            restored=row[0] if row else "off"
+            if restored not in ("off","armed","geofence"):
+                raise RuntimeError("Saved tracker mode is invalid")
+            cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",(restored,))
+    state["mode"]=restored
 
 def refresh_vitals(force=False):
     if not PARTICLE_ACCESS_TOKEN or not PARTICLE_DEVICE_ID:
@@ -530,6 +554,10 @@ def setmode(x:Mode):
     if x.mode in ("off","armed"):
         set_tracker_power_profile(x.mode)
 
+    try:
+        save_selected_mode(x.mode)
+    except Exception:
+        raise HTTPException(503,"Tracker profile may have been accepted, but the selected mode could not be saved. Please retry.")
     state["mode"]=x.mode
     if x.mode=="off":
         state["alarm"]=False;state["alarm_reason"]=None
@@ -793,6 +821,7 @@ def homebase_console():
 @app.on_event("startup")
 def startup_discover():
     history_init()
+    restore_selected_mode()
     history_record("server","SERVER START","Rick's Trackers backend started")
     ensure_alarm_poll_worker()
     try: discover_telegram_chat()
