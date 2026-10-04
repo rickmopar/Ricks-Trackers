@@ -7,8 +7,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from monitoring import Monitor
+from monitoring import Monitor, Vitals
 monitor = Monitor()
+vitals = Vitals()
 
 app=FastAPI(title="Rick's Trackers")
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
@@ -121,6 +122,7 @@ def refresh_vitals(force=False):
             return
         doc=r.json()
         diag=doc.get("diagnostics",{}) if isinstance(doc,dict) else {}
+        vitals.add(diag)
         payload=diag.get("payload",{}) if isinstance(diag,dict) else {}
         device=payload.get("device",{}) if isinstance(payload,dict) else {}
         network=device.get("network",{}) if isinstance(device,dict) else {}
@@ -164,7 +166,7 @@ def note(t,d):
 def timeline(stage,detail="",when=None,kind="info"):
     ts=when or datetime.now(timezone.utc).isoformat()
     state["timeline"].insert(0,{"stage":stage,"detail":detail,"time":ts,"kind":kind})
-    state["timeline"]=state["timeline"][:100]
+    state["timeline"]=state["timeline"][:500]
     history_record(kind or "timeline",stage,detail,event_time=ts)
 
 def iso_from_event_time(v):
@@ -224,7 +226,7 @@ def send_alert(body,key,force=False):
         delay=seconds_between(origin,sent_at) if origin else None
         if delay is not None:
             detail=f"Telegram accepted alert • {delay:.1f}s from device motion event"
-    timeline("TELEGRAM SENT",detail,sent_at,"alert")
+    timeline("TELEGRAM ACCEPTED",detail,sent_at,"alert")
     note("Telegram alert sent",body[:120]);return True
 
 def miles(a,b,c,d):
@@ -524,6 +526,7 @@ def ensure_alarm_poll_worker():
 def setmode(x:Mode):
     # Apply the tracker-side power/security profile first so the app mode
     # reflects what Particle accepted (or queued for an offline device).
+    timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
     if x.mode in ("off","armed"):
         set_tracker_power_profile(x.mode)
 
@@ -534,6 +537,7 @@ def setmode(x:Mode):
         note("Mode changed","off • tracker entering low-power sleep with 60-minute check-ins")
         timeline("TRAVEL/OFF","Low-power sleep enabled • 60-minute check-ins",kind="mode")
     elif x.mode=="armed":
+        timeline("ARM PROFILE SUBMITTED", "Particle accepted or queued the armed profile; this is not device confirmation", kind="mode")
         fresh=request_fresh_location()
         ok=bool(fresh.get("ok"))
         note("Mode changed","armed • motion detection restored • fresh tracker location requested" if ok else "armed • motion restored • tracker ping failed")
@@ -698,6 +702,9 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             print(f"Particle event ignored: event={event_name} payload_type={type(payload).__name__}")
             return {"ok":True,"ignored":"non-location or unsupported Particle event"}
 
+    if x.timestamp:
+        timeline("GPS LOCATION REPORTED" if x.gps_fix else "LOCATION REPORTED", f"{x.lat:.6f}, {x.lon:.6f} • tracker report timestamp; not a matched ping response", x.timestamp, "location")
+    timeline("LOCATION RECEIVED", f"{x.lat:.6f}, {x.lon:.6f} • server receipt", webhook_received_at, "server")
     monitor.record("location", "received")
     prev=state["external_power"]
     for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:
@@ -743,11 +750,14 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
 # Instrument existing calls so manual and automatic pings share the same counters.
 _original_location_request = request_fresh_location
 def request_fresh_location():
+    timeline("PING REQUESTED", "Server began requesting a fresh location", kind="tracking")
     try:
         result = _original_location_request()
+        timeline("PING ACCEPTED" if result.get("ok") else "PING FAILED", "Command response received; GPS report arrives separately" if result.get("ok") else "Particle did not confirm the location request", kind="tracking")
         monitor.record("ping", "success" if result.get("ok") else "failure")
         return result
     except Exception:
+        timeline("PING FAILED", "No successful command response", kind="tracking")
         monitor.record("ping", "failure")
         raise
 
@@ -758,6 +768,7 @@ def send_alert(*args, **kwargs):
         monitor.record("telegram", "success" if result else "skipped")
         return result
     except Exception:
+        timeline("TELEGRAM FAILED", "Telegram did not confirm acceptance", kind="alert")
         monitor.record("telegram", "failure")
         raise
 
@@ -770,6 +781,8 @@ def homebase_console():
                         "commit": os.getenv("RENDER_GIT_COMMIT", "")[:7]}
     result["last_location_at"] = state.get("last_seen")
     result["last_alert_at"] = state.get("last_alert_at")
+    result["vitals"] = vitals.snapshot()
+    result["timeline"] = list(state["timeline"])
     result["database"] = "ready" if _history_db_ready else "unavailable" if HISTORY_DATABASE_URL else "not_configured"
     return result
 

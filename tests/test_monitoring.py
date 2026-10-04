@@ -40,3 +40,18 @@ class MonitoringTests(unittest.TestCase):
         self.assertIsNone(d["cellular_usage_mb"])
 
 if __name__=="__main__":unittest.main()
+
+class VitalsTests(unittest.TestCase):
+    def test_units_missing_and_deduplication(self):
+        from monitoring import parse_vitals, Vitals
+        doc={"updated_at":"2026-10-03T12:00:00Z","payload":{"device":{"network":{"signal":{"strength":62,"quality":88}},"cloud":{"coap":{"round_trip":872}},"system":{"memory":{"used":75,"total":100}}}}}
+        result=parse_vitals(doc)
+        self.assertEqual(result["rtt"],.872)
+        self.assertEqual(result["memory"],75)
+        v=Vitals();v.add(doc);v.add(doc)
+        self.assertEqual(len(v.snapshot()),1)
+        self.assertIsNone(parse_vitals({}))
+        doc["payload"]["device"]["network"]["signal"]["strength"]={"err":1}
+        doc["payload"]["device"]["system"]["memory"]["total"]=0
+        result=parse_vitals(doc)
+        self.assertIsNone(result["strength"]);self.assertIsNone(result["memory"])

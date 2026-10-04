@@ -18,6 +18,8 @@
 
 .console-status,.charts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.charts{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:14px}.service,.chart{background:#0b1522;border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}.service strong{display:block;margin:9px 0;font-size:19px}.ok{color:#20c8d4}.warn{color:var(--amber)}.bad{color:var(--red)}.chart svg{width:100%;height:150px;display:block;margin-top:12px}.console-log{max-height:240px;overflow:auto;font:12px/1.8 ui-monospace,monospace;margin-top:14px}.console-log div{border-bottom:1px solid var(--line);padding:4px}.legend{display:flex;gap:15px;font-size:12px;color:var(--muted)}.console-head{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}.console-head h2{margin:0 0 6px}.metricline{margin-top:12px;color:var(--muted);font-size:12px}
 @media(max-width:700px){.console-status,.charts{grid-template-columns:1fr 1fr}.charts{grid-template-columns:1fr}}
+
+.vitals-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.vital-chart{min-width:0}.vital-chart svg{width:100%;height:180px}.journey{max-height:600px;overflow:auto;padding:10px 10px 10px 24px}.step{position:relative;border-left:2px solid #294859;padding:0 0 24px 22px}.step:before{content:'';position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:#20c8d4}.step time{color:#a9bdcf;font:12px ui-monospace,monospace}.step h3{font-size:14px;margin:7px 0}.elapsed{display:inline-block;background:#173445;border-radius:5px;padding:3px 7px;font-size:11px;margin:5px 0}.step p{margin:4px 0;font-size:12px;color:#a9bdcf;overflow-wrap:anywhere}@media(max-width:650px){.vitals-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body><div class="wrap">
@@ -45,6 +47,14 @@
  <div class="legend"><span style="color:#20c8d4">● Success / received</span><span style="color:#ff5063">● Failure</span><span>● Skipped / offline</span></div>
  <details style="margin-top:16px" open><summary>Event console · latest 100 observations</summary><div id="consoleLog" class="console-log">No observations yet.</div></details>
 </section>
+
+<section class="card"><h2>Tracker vitals</h2><p class="small" id="vitalsAge">Waiting for diagnostic reports…</p><div class="vitals-grid">
+<div class="chart vital-chart"><b>Signal strength</b><div id="strengthVital"></div></div>
+<div class="chart vital-chart"><b>Signal quality</b><div id="qualityVital"></div></div>
+<div class="chart vital-chart"><b>Round-trip time</b><div class="small">Tracker → Particle cloud, in seconds</div><div id="rttVital"></div></div>
+<div class="chart vital-chart"><b>Memory usage</b><div id="memoryVital"></div></div>
+</div></section>
+<section class="card"><h2>Alarm &amp; location timeline</h2><p class="small">Oldest → newest · times include seconds in your local timezone. Elapsed times compare recorded timestamps; tracker and server clocks may differ. Location reports are not guaranteed to be responses to a particular ping.</p><p class="small">Latest 500 steps since server restart. Telegram accepted means accepted for sending, not delivered to your phone.</p><div id="journey" class="journey" aria-live="polite">Waiting for events. Arming, alarm pings and location reports will appear here.</div></section>
 <div class="layout">
 <div>
   <div class="card">
@@ -117,6 +127,26 @@ async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'
 async function clearAlarm(){try{renderLive(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));setTimeout(refresh,500)}catch(e){alert(e.message)}}
 
 let consoleBusy=false,consoleLastSuccess=0;
+
+function renderVitals(samples){
+ const sorted=(samples||[]).filter(x=>Number.isFinite(x.time)).sort((a,b)=>a.time-b.time);
+ $('vitalsAge').textContent=sorted.length?'Last diagnostic report '+age(new Date(sorted.at(-1).time*1000))+' · '+new Date(sorted.at(-1).time*1000).toLocaleString()+' · up to 240 distinct reports observed since restart. Missing values are not zero.':'No diagnostic reports available yet.';
+ for(const key of ['strength','quality','rtt','memory']){
+  const pts=sorted.filter(s=>Number.isFinite(s[key])),unit=key==='rtt'?'s':'%';
+  if(!pts.length){$(key+'Vital').innerHTML='<p class="small">No reported data for this metric.</p>';continue}
+  const max=key==='rtt'?Math.max(1,...pts.map(p=>p[key])):100;
+  let lo=sorted[0].time,hi=sorted.at(-1).time;if(hi===lo){lo-=60;hi+=60}
+  let svg='<svg viewBox="0 0 600 180" role="img" aria-label="'+key+' over time">';
+  for(let i=0;i<=4;i++){let y=140-i*30;svg+='<line x1="50" x2="580" y1="'+y+'" y2="'+y+'" stroke="#26364b"/><text x="42" y="'+(y+4)+'" text-anchor="end" font-size="11" fill="#93a4ba">'+(max*i/4).toFixed(key==='rtt'?2:0)+unit+'</text>'}
+  for(const p of pts){const x=50+(p.time-lo)/(hi-lo)*530,y=140-p[key]/max*120;svg+='<circle cx="'+x+'" cy="'+y+'" r="4" fill="#e8fdff" stroke="#00c4d4" stroke-width="2"><title>'+esc(new Date(p.time*1000).toLocaleString()+' · '+p[key].toFixed(2)+unit)+'</title></circle>'}
+  svg+='<text x="50" y="170" fill="#93a4ba" font-size="11">'+esc(new Date(lo*1000).toLocaleTimeString())+'</text><text x="580" y="170" text-anchor="end" fill="#93a4ba" font-size="11">'+esc(new Date(hi*1000).toLocaleTimeString())+'</text></svg>';
+  $(key+'Vital').innerHTML=svg;
+ }
+}
+function renderJourney(items){
+ const rows=(items||[]).map((e,i)=>({...e,ms:Date.parse(e.time),i})).filter(e=>Number.isFinite(e.ms)).sort((a,b)=>a.ms-b.ms||b.i-a.i);
+ $('journey').innerHTML=rows.map((e,i)=>'<article class="step"><time>'+esc(new Date(e.ms).toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}))+'</time>'+ (i?'<div><span class="elapsed">+'+((e.ms-rows[i-1].ms)/1000).toFixed(1)+'s from previous step</span></div>':'')+'<h3>'+esc(e.stage)+'</h3><p>'+esc(e.detail)+'</p></article>').join('')||'No recorded steps yet. No test alarms are generated by this view.';
+}
 function service(name,text,detail,kind){$(name+'Status').textContent=text;$(name+'Status').className=kind;$(name+'Detail').textContent=detail}
 function chart(id,buckets,keys,online=false){
  const W=600,H=150,pad=22,colors=['#20c8d4','#ff5063','#738196'];
@@ -133,6 +163,7 @@ async function refreshConsole(){
   const r=await fetch('/api/homebase/console',{cache:'no-store',signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();consoleLastSuccess=Date.now();
   service('link','Connected',Math.round(performance.now()-start)+' ms response','ok');
   service('render','Responding','Uptime '+Math.floor(d.render.uptime_sec/60)+' min'+(d.render.commit?' · '+d.render.commit:''),'ok');
+  renderVitals(d.vitals);renderJourney(d.timeline);
   const p=d.services.particle,t=d.services.telegram;
   service('particle',p.status==='connected'?(p.device_online===true?'Tracker online':p.device_online===false?'Tracker offline':'Cloud connected'):p.status.replaceAll('_',' '),p.status==='connected'?'Cloud API reachable · last contact '+age(p.last_heard):'Last API check '+age(new Date(p.checked_at*1000)),p.status==='connected'&&p.device_online===true?'ok':'warn');
   service('telegram',t.status==='connected'?'Bot connected':t.status.replaceAll('_',' '),(t.chat_configured?'Chat configured':'Chat not confirmed')+' · last accepted alert '+age(d.last_alert_at),t.status==='connected'&&t.chat_configured?'ok':'warn');

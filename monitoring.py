@@ -75,3 +75,41 @@ class Monitor:
                     "buckets": [{"time": t, **self.buckets.get(t, {})} for t in range(start, minute + 1, 60)],
                     "events": list(self.events)[-100:][::-1],
                     "cellular_usage_mb": None}
+
+def parse_vitals(diag):
+    """Use the diagnostic report's timestamp, never the browser refresh time."""
+    import math
+    def obj(v): return v if isinstance(v, dict) else {}
+    def number(v, maximum=None):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+            return None
+        return v if maximum is None or v <= maximum else None
+    stamp = diag.get("updated_at")
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None: return None
+        timestamp = parsed.timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return None
+    device = obj(obj(diag.get("payload")).get("device"))
+    signal = obj(obj(device.get("network")).get("signal"))
+    memory = obj(obj(device.get("system")).get("memory"))
+    used, total = number(memory.get("used")), number(memory.get("total"))
+    rtt = number(obj(obj(device.get("cloud")).get("coap")).get("round_trip"))
+    return {"time": timestamp, "strength": number(signal.get("strength"), 100),
+            "quality": number(signal.get("quality"), 100),
+            "rtt": None if rtt is None else rtt / 1000,
+            "memory": used / total * 100 if used is not None and total and used <= total else None}
+
+class Vitals:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.samples = {}
+    def add(self, diag):
+        sample = parse_vitals(diag)
+        if sample is None: return
+        with self.lock:
+            self.samples[sample["time"]] = sample
+            self.samples = dict(sorted(self.samples.items())[-240:])
+    def snapshot(self):
+        with self.lock: return list(self.samples.values())
