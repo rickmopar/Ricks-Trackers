@@ -48,13 +48,24 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.refresh(),'pending')
         self.config=p;self.pending={}
         self.assertEqual(self.refresh(),'confirmed')
+    def test_geofence_uses_armed_wake_profile_and_confirms(self):
+        self.env['state']['mode']='geofence'
+        self.env['set_tracker_power_profile']('geofence')
+        p=self.sent[-1]
+        self.assertEqual(p['imu_trig']['motion'],'high')
+        self.assertEqual(p['location']['interval_min'],60)
+        self.config=p;self.pending={}
+        self.assertEqual(self.refresh(),'confirmed')
+
     def test_conflicting_pending_sleep_is_not_confirmed(self):
         self.config['sleep']['mode']='disable'
         self.pending={'sleep':{'mode':'enable'}}
         self.assertEqual(self.refresh(),'pending')
     def test_cloud_failure_never_confirms_armed(self):
         self.env['get_particle_config']=lambda:(_ for _ in ()).throw(RuntimeError('offline'))
-        self.assertEqual(self.refresh(),'unknown')
+        self.refresh()
+        self.assertEqual(self.env['state']['mode_status'],'unknown')
+        self.assertEqual(self.env['state']['readiness'],'not_ready')
 
     def test_storage_uses_hourly_sleep_and_never_ready(self):
         self.env['state']['tasking_state']='storage'
