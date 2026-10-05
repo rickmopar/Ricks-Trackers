@@ -20,7 +20,7 @@
 @media(max-width:700px){.console-status,.charts{grid-template-columns:1fr 1fr}.charts{grid-template-columns:1fr}}
 
 .vitals-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.vital-chart{min-width:0}.vital-chart svg{width:100%;height:180px}.journey{max-height:600px;overflow:auto;padding:10px 10px 10px 24px}.step{position:relative;border-left:2px solid #294859;padding:0 0 24px 22px}.step:before{content:'';position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:#20c8d4}.step time{color:#a9bdcf;font:12px ui-monospace,monospace}.step h3{font-size:14px;margin:7px 0}.elapsed{display:inline-block;background:#173445;border-radius:5px;padding:3px 7px;font-size:11px;margin:5px 0}.step p{margin:4px 0;font-size:12px;color:#a9bdcf;overflow-wrap:anywhere}@media(max-width:650px){.vitals-grid{grid-template-columns:1fr}}
-.command-warning{background:#493b10!important;color:#ffe082!important;border:1px solid #f5c542;padding:12px;border-radius:10px}.row.command-warning,.step.command-warning{border-left:4px solid #f5c542}</style>
+.command-warning{background:#493b10!important;color:#ffe082!important;border:1px solid #f5c542;padding:12px;border-radius:10px}.row.command-warning,.step.command-warning{border-left:4px solid #f5c542}.confirmed{outline:2px solid #ff5063!important;background:#6b1f2b!important;color:#fff}.pending{outline:2px solid #f5c542!important;background:#493b10!important;color:#ffe082}.inactive{opacity:.82}.readiness-ready{color:#8df0b8}.readiness-pending{color:#ffe082}.readiness-notready{color:#ff8b98}</style>
 </head>
 <body><div class="wrap">
 <div class="top">
@@ -86,7 +86,7 @@
       <button class="danger" onclick="clearAlarm()">CLEAR ALARM</button>
     </div>
     <div id="map"></div>
-    <div class="actions"><button onclick="centerTracker()">CENTER ON TRACKER</button><button onclick="showRoute()">SHOW HISTORY ROUTE</button></div>
+    <div class="actions"><button onclick="centerTracker()">TRACK TRAILER</button><button onclick="resync()">RESYNC</button><button onclick="showRoute()">STATUS / HISTORY</button></div>
     <div style="margin-top:12px"><a id="googleLocation" target="_blank" rel="noopener noreferrer" hidden style="display:inline-block;padding:12px;border:1px solid #31445f;border-radius:12px;font-weight:700">View location in Google Maps</a><span id="googleLocationWaiting" class="small">Waiting for a GPS location</span></div>
     <div class="stats">
       <div class="stat"><div class="label">Last update</div><div class="value" id="last">—</div></div>
@@ -120,14 +120,14 @@ const googleLink=$('googleLocation');googleLink.hidden=!hasLocation;googleLink.s
 if(hasLocation)googleLink.href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(s.lat+','+s.lon);else googleLink.removeAttribute('href');
 $('conn').textContent='Connected';$('last').textContent=age(s.last_seen);$('speed').textContent=Math.round(s.speed_mph??0)+' mph';$('battery').textContent=s.battery_percent==null?'—':s.battery_percent+'%';$('power').textContent=s.external_power==null?'—':s.external_power?'Connected':'Battery only';$('lte').textContent=s.lte||'—';$('gps').textContent=s.gps_fix===true?'Locked':s.gps_fix===false?'No fix':'—';$('telegram').textContent=s.telegram_configured?'READY':'—';$('mode').textContent=modeLabel(s.mode);$('geo').textContent=(s.geofence_ft||'—')+' ft';$('imu').textContent=(s.imu_sensitivity||'—').toUpperCase();$('alarm').textContent=s.alarm?(s.alarm_reason||'ACTIVE'):'Clear';$('lastalert').textContent=age(s.last_alert_at);$('sub').textContent=s.alarm?(s.alarm_reason||'Alarm active'):'Monitoring normally';
 latestReadiness=s.readiness;
-const readinessNames={ready:'READY FOR TASKING',startup_pending:'STARTUP PENDING',storage:'STORAGE / HOURLY SLEEP',storage_pending:'STORAGE PENDING',checking:'CHECKING TRACKER'};
-$('readyLabel').textContent=readinessNames[s.readiness]||'CHECKING TRACKER';
+const readinessNames={ready:'READY',startup_pending:'CHECKING / STARTING',storage:'STORAGE / HOURLY SLEEP',storage_pending:'CHECKING / STORAGE',checking:'CHECKING',not_ready:'NOT READY'};
+$('readyLabel').textContent=readinessNames[s.readiness]||'CHECKING';$('readyLabel').className=s.readiness==='ready'?'readiness-ready':s.readiness==='not_ready'?'readiness-notready':'readiness-pending';
 $('readyDetail').textContent=s.readiness_message||'Waiting for tracker confirmation';
 ['armed','geofence'].forEach(v=>$('m'+v).disabled=modeBusy||s.readiness!=='ready');
 const warning=s.command_warning||commandError;
 $('controlStatus').textContent=warning||(modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings'));
 $('controlStatus').classList.toggle('command-warning',Boolean(warning));
-['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
+['armed','geofence','off'].forEach(x=>{const b=$('m'+x),selected=s.mode===x,pending=selected&&s.mode_status!=='confirmed';b.classList.toggle('active',selected);b.classList.toggle('pending',pending);b.classList.toggle('confirmed',selected&&s.mode_status==='confirmed'&&x!=='off');b.classList.toggle('inactive',!selected);});let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
 if(map&&hasLocation){if(!marker){marker=L.marker([s.lat,s.lon]).addTo(map);map.setView([s.lat,s.lon],15)}else marker.setLatLng([s.lat,s.lon])}}
 function centerTracker(){if(map&&marker)map.setView(marker.getLatLng(),15)}
 function showRoute(){if(map&&path&&path.getLatLngs().length)map.fitBounds(path.getBounds(),{padding:[20,20],maxZoom:16})}
@@ -158,6 +158,7 @@ async function mode(x){
  catch(e){commandError='Command failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}
  finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
 }
+async function resync(){if(modeBusy)return;modeBusy=true;commandError=null;$('controlStatus').textContent='Resyncing tracker status…';try{const result=await api('/api/trailer/resync',{method:'POST',body:'{}'});renderLive(result)}catch(e){commandError='Resync failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}finally{modeBusy=false}}
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
 async function clearAlarm(){try{renderLive(await api('/api/trailer/clear-alarm',{method:'POST',body:'{}'}));setTimeout(refresh,500)}catch(e){alert(e.message)}}
 
