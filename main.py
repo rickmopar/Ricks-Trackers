@@ -431,15 +431,18 @@ def set_tracker_power_profile(mode,tasking_state=None):
         motion=desired
     else:
         updated["sleep"]["mode"]="disable"
-        updated["imu_trig"]["motion"]="disable"
+        desired=state.get("_armed_motion_sensitivity")
+        if desired not in ("low","medium","high"):
+            desired="high"
+        updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
-        motion="disable"
-        interval=3600
+        motion=desired
+        interval=updated["location"].get("interval_max")
 
     if (tasking_state or state["tasking_state"])=="storage":
         updated["sleep"]["mode"]="enable"
         updated["imu_trig"]["motion"]="disable"
-    updated["location"]["interval_min"]=60 if mode=="armed" else 3600
+    updated["location"]["interval_min"]=60 if mode in ("armed","geofence") else 3600
     updated["location"]["interval_max"]=3600
     updated["location"]["lock_trigger"]=False
     url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
