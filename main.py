@@ -365,7 +365,8 @@ def refresh_control_status(force=False):
         if state["readiness"]=="ready" and previous!="ready":
             timeline("READY FOR TASKING","Particle confirms tracker online and awake settings applied",kind="mode")
         state["mode_message"]=("Tracker settings confirmed" if state["mode_status"]=="confirmed" else
-            "Waiting for tracker to connect and apply settings. A sleeping tracker wakes at its next hourly check-in.")
+            ("Tracker is online; waiting for the requested mode settings to be confirmed." if state["device_online"] else
+             "Waiting for tracker connection. A sleeping tracker checks in hourly."))
     except Exception:
         state["readiness"]="checking"
         state["device_online"]=None
@@ -373,6 +374,28 @@ def refresh_control_status(force=False):
         state["mode_status"]="unknown"
         state["mode_message"]="Cannot confirm tracker settings. Check the connection and retry."
 
+
+def deliver_config_now(updated):
+    """Keep cloud configuration queued, but also deliver to an online tracker."""
+    try:
+        headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"}
+        device=requests.get(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}",headers=headers,timeout=10)
+        device.raise_for_status()
+        if device.json().get("connected") is not True:
+            return False
+        cfg={name:updated[name] for name in ("location","imu_trig","sleep") if name in updated}
+        arg=requests.models.complexjson.dumps({"cmd":"set_cfg","cfg":cfg},separators=(",",":"))
+        if len(arg.encode())>1024:
+            return False
+        result=requests.post(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}/cmd",
+                             headers=headers,json={"arg":arg},timeout=20)
+        result.raise_for_status()
+        accepted=result.json().get("return_value")==0
+        print(f"Direct tracker configuration accepted={accepted}")
+        return accepted
+    except Exception:
+        print("Direct tracker configuration not confirmed; cloud request remains queued")
+        return False
 
 def set_tracker_power_profile(mode,tasking_state=None):
     """Apply Particle-side power behavior for app modes without changing secrets or firmware."""
@@ -425,6 +448,7 @@ def set_tracker_power_profile(mode,tasking_state=None):
     if not r.ok:
         raise HTTPException(r.status_code,f"Particle power-profile update failed: {r.text[:260]}")
 
+    deliver_config_now(updated)
     state["mode_status"]="pending"
     state["mode_message"]="Command submitted; waiting for the tracker to apply it."
     state["_control_checked"]=0
@@ -445,6 +469,7 @@ def set_imu_motion(sensitivity):
     r=requests.put(url,headers=headers,json=updated,timeout=20)
     if not r.ok:
         raise HTTPException(r.status_code,f"Particle IMU update failed: {r.text[:260]}")
+    deliver_config_now({"imu_trig":updated["imu_trig"]})
     state["_armed_motion_sensitivity"]=sensitivity
     state["imu_sensitivity"]=sensitivity
     state["imu_pending"]=sensitivity

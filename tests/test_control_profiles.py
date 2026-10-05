@@ -22,7 +22,7 @@ class ControlTests(unittest.TestCase):
         self.env={'state':{'mode':'off','tasking_state':'ready','_armed_motion_sensitivity':'high'},'time':SimpleNamespace(time=lambda:100),
                   'get_particle_config':lambda:{'configuration':{'current':copy.deepcopy(self.config),'pending':copy.deepcopy(self.pending)}},
                   'requests':SimpleNamespace(models=SimpleNamespace(complexjson=json),put=put,get=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{"connected":self.online})),
-                  'PARTICLE_DEVICE_ID':'test','PARTICLE_ACCESS_TOKEN':'test','note':lambda *args:None,'timeline':lambda *a,**k:None}
+                  'PARTICLE_DEVICE_ID':'test','PARTICLE_ACCESS_TOKEN':'test','note':lambda *args:None,'timeline':lambda *a,**k:None,'deliver_config_now':lambda updated:False}
         exec(compile(ast.Module(body=functions,type_ignores=[]),str(SOURCE),'exec'),self.env)
     def refresh(self):
         self.env['refresh_control_status'](force=True)
@@ -82,3 +82,23 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(self.sent[-1]['sleep']['mode'],'disable')
 
 if __name__=='__main__':unittest.main()
+
+class DeliveryTests(unittest.TestCase):
+    def test_online_delivery_and_offline_queue(self):
+        tree=ast.parse(SOURCE.read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='deliver_config_now')
+        sent=[]
+        online=[True]
+        def post(*a,**kw):
+            sent.append(json.loads(kw['json']['arg']))
+            return SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'return_value':0})
+        env={'requests':SimpleNamespace(models=SimpleNamespace(complexjson=json),post=post,
+            get=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'connected':online[0]})),
+            'PARTICLE_ACCESS_TOKEN':'test','PARTICLE_DEVICE_ID':'test'}
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),str(SOURCE),'exec'),env)
+        profile={'imu_trig':{'motion':'high'},'sleep':{'mode':'disable'},'geofence':{'zone1':{}}}
+        self.assertTrue(env['deliver_config_now'](profile))
+        self.assertEqual(sent[0]['cfg'],{'imu_trig':{'motion':'high'},'sleep':{'mode':'disable'}})
+        online[0]=False
+        self.assertFalse(env['deliver_config_now'](profile))
+        self.assertEqual(len(sent),1)
