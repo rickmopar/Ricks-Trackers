@@ -668,8 +668,7 @@ def tasking(x:Tasking):
     finally:
         _mode_change_lock.release()
 
-@app.post("/api/trailer/mode")
-def setmode(x:Mode, background_tasks:BackgroundTasks):
+def setmode_once(x:Mode, background_tasks:BackgroundTasks):
     if not _mode_change_lock.acquire(blocking=False):
         raise HTTPException(409,"A mode change is already being submitted. Please wait.")
     try:
@@ -697,6 +696,41 @@ def setmode(x:Mode, background_tasks:BackgroundTasks):
         return pub()
     finally:
         _mode_change_lock.release()
+@app.post("/api/trailer/mode")
+def setmode(x:Mode, background_tasks:BackgroundTasks):
+    # A newer user request supersedes retries of an older request.
+    request_id=object()
+    state["_mode_request_id"]=request_id
+    label="DISARM" if x.mode=="off" else x.mode.upper()
+    state["command_warning"]=None
+    for attempt in range(1,4):
+        if state.get("_mode_request_id") is not request_id:
+            raise HTTPException(409,"This command was replaced by a newer mode request.")
+        try:
+            result=setmode_once(x,background_tasks)
+            if state.get("_mode_request_id") is request_id:
+                state["command_warning"]=None
+            if attempt>1:
+                timeline(label+" RETRY ACCEPTED","Request accepted on attempt "+str(attempt)+"; see mode status for device confirmation",kind="mode")
+            return pub()
+        except Exception as exc:
+            code=exc.status_code if isinstance(exc,HTTPException) else 502
+            # Retry temporary service/network failures, never rejected inputs/authentication.
+            retryable=code>=500 or code in (408,429)
+            retry=retryable and attempt<3 and state.get("_mode_request_id") is request_id
+            reason=("Service error (HTTP "+str(code)+")" if isinstance(exc,HTTPException) else "Connection or server error")
+            message=label+" FAILED — "+reason+". Attempt "+str(attempt)+" of 3. "
+            message+=("Retrying in 3 seconds." if retry else "Not confirmed. Please try again.")
+            timeline(label+" FAILED",message,kind="warning")
+            print("Mode command failure: mode="+x.mode+" attempt="+str(attempt)+" status="+str(code)+" type="+type(exc).__name__)
+            if state.get("_mode_request_id") is request_id:
+                state["command_warning"]=message
+            if not retry:
+                raise HTTPException(code,message)
+            time.sleep(3)
+            if state.get("_mode_request_id") is request_id:
+                timeline(label+" RETRY","Automatic attempt "+str(attempt+1)+" of 3",kind="warning")
+
 @app.post("/api/trailer/geofence")
 def setgeo(x:Fence):
     state["geofence_ft"]=x.feet; note("Geofence changed",f"{x.feet} ft"); return pub()
@@ -1005,7 +1039,6 @@ def startup_discover():
         print(f"Particle development-device verify ok={dev_ok}")
         if dev_ok:
             time.sleep(1)
-            set_tracker_power_profile(state["mode"])
             refresh_control_status(force=True)
             print(f"Particle control status={state['mode_status']}")
     except Exception as e:

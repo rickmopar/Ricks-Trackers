@@ -20,7 +20,7 @@
 @media(max-width:700px){.console-status,.charts{grid-template-columns:1fr 1fr}.charts{grid-template-columns:1fr}}
 
 .vitals-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.vital-chart{min-width:0}.vital-chart svg{width:100%;height:180px}.journey{max-height:600px;overflow:auto;padding:10px 10px 10px 24px}.step{position:relative;border-left:2px solid #294859;padding:0 0 24px 22px}.step:before{content:'';position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:#20c8d4}.step time{color:#a9bdcf;font:12px ui-monospace,monospace}.step h3{font-size:14px;margin:7px 0}.elapsed{display:inline-block;background:#173445;border-radius:5px;padding:3px 7px;font-size:11px;margin:5px 0}.step p{margin:4px 0;font-size:12px;color:#a9bdcf;overflow-wrap:anywhere}@media(max-width:650px){.vitals-grid{grid-template-columns:1fr}}
-</style>
+.command-warning{background:#493b10!important;color:#ffe082!important;border:1px solid #f5c542;padding:12px;border-radius:10px}.row.command-warning,.step.command-warning{border-left:4px solid #f5c542}</style>
 </head>
 <body><div class="wrap">
 <div class="top">
@@ -124,17 +124,19 @@ const readinessNames={ready:'READY FOR TASKING',startup_pending:'STARTUP PENDING
 $('readyLabel').textContent=readinessNames[s.readiness]||'CHECKING TRACKER';
 $('readyDetail').textContent=s.readiness_message||'Waiting for tracker confirmation';
 ['armed','geofence'].forEach(v=>$('m'+v).disabled=modeBusy||s.readiness!=='ready');
-$('controlStatus').textContent=modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings');
+const warning=s.command_warning||commandError;
+$('controlStatus').textContent=warning||(modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings'));
+$('controlStatus').classList.toggle('command-warning',Boolean(warning));
 ['armed','geofence','off'].forEach(x=>$('m'+x).classList.toggle('active',s.mode===x));let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
 if(map&&hasLocation){if(!marker){marker=L.marker([s.lat,s.lon]).addTo(map);map.setView([s.lat,s.lon],15)}else marker.setLatLng([s.lat,s.lon])}}
 function centerTracker(){if(map&&marker)map.setView(marker.getLatLng(),15)}
 function showRoute(){if(map&&path&&path.getLatLngs().length)map.fitBounds(path.getBounds(),{padding:[20,20],maxZoom:16})}
-function renderHistory(d){$('dbstate').textContent=d.persistent?'Persistent history connected • '+d.count+' records shown':(d.error||'History database not connected');$('dbstate').className='small '+(d.persistent?'dbgood':'dbbad');const items=d.items||[];$('historyrows').innerHTML=items.map(x=>'<div class="row" data-lat="'+(x.lat??'')+'" data-lon="'+(x.lon??'')+'"><div>'+esc(new Date(x.event_time||x.created_at).toLocaleString())+'</div><div class="muted">'+esc((x.category||'').toUpperCase())+'</div><div><div class="title">'+esc(x.title)+'</div><div class="muted">'+esc(x.detail||'')+'</div></div><div>'+((x.speed_mph==null)?'—':Math.round(x.speed_mph)+' mph')+'</div><div>'+((x.battery_percent==null)?'—':x.battery_percent+'%')+'</div></div>').join('')||'<div class="small" style="padding:16px">No history yet.</div>';
+function renderHistory(d){$('dbstate').textContent=d.persistent?'Persistent history connected • '+d.count+' records shown':(d.error||'History database not connected');$('dbstate').className='small '+(d.persistent?'dbgood':'dbbad');const items=d.items||[];$('historyrows').innerHTML=items.map(x=>'<div class="row '+(x.category==='warning'?'command-warning':'')+'" data-lat="'+(x.lat??'')+'" data-lon="'+(x.lon??'')+'"><div>'+esc(new Date(x.event_time||x.created_at).toLocaleString())+'</div><div class="muted">'+esc((x.category||'').toUpperCase())+'</div><div><div class="title">'+esc(x.title)+'</div><div class="muted">'+esc(x.detail||'')+'</div></div><div>'+((x.speed_mph==null)?'—':Math.round(x.speed_mph)+' mph')+'</div><div>'+((x.battery_percent==null)?'—':x.battery_percent+'%')+'</div></div>').join('')||'<div class="small" style="padding:16px">No history yet.</div>';
 const pts=items.filter(x=>typeof x.lat==='number'&&typeof x.lon==='number').reverse().map(x=>[x.lat,x.lon]);if(path)path.setLatLngs(pts)}
 let refreshBusy=false;
 async function refresh(){if(refreshBusy)return;refreshBusy=true;const requestedHours=hours;try{renderLive(await api('/api/trailer/status'));const h=await api('/api/homebase/history?hours='+requestedHours+'&limit=5000');if(hours===requestedHours)renderHistory(h)}catch(e){$('conn').textContent='Offline'}finally{refreshBusy=false;if(hours!==requestedHours)refresh()}}
 function setHours(h){hours=h;[24,168,720,0].forEach(x=>$('f'+x).classList.toggle('active',x===h));refresh()}
-let modeBusy=false,latestReadiness=null;
+let modeBusy=false,latestReadiness=null,commandError=null;
 async function tasking(action){
  if(modeBusy)return;
  if(action==='storage'&&!confirm('Turn off alarms and put the tracker in storage sleep with hourly check-ins?'))return;
@@ -148,11 +150,12 @@ async function tasking(action){
 }
 async function mode(x){
  if(modeBusy)return;
+ commandError=null;
  modeBusy=true;
  ['armed','geofence','off'].forEach(v=>$('m'+v).disabled=true);
  $('controlStatus').textContent='Sending '+x.toUpperCase()+' command…';
  try{const result=await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})});modeBusy=false;renderLive(result)}
- catch(e){$('controlStatus').textContent='Command failed: '+e.message}
+ catch(e){commandError='Command failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}
  finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
 }
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}
@@ -177,7 +180,7 @@ function renderVitals(samples){
 }
 function renderJourney(items){
  const rows=(items||[]).map((e,i)=>({...e,ms:Date.parse(e.time),i})).filter(e=>Number.isFinite(e.ms)).sort((a,b)=>a.ms-b.ms||b.i-a.i);
- $('journey').innerHTML=rows.map((e,i)=>'<article class="step"><time>'+esc(new Date(e.ms).toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}))+'</time>'+ (i?'<div><span class="elapsed">+'+((e.ms-rows[i-1].ms)/1000).toFixed(1)+'s from previous step</span></div>':'')+'<h3>'+esc(e.stage)+'</h3><p>'+esc(e.detail)+'</p></article>').join('')||'No recorded steps yet. No test alarms are generated by this view.';
+ $('journey').innerHTML=rows.map((e,i)=>'<article class="step '+(e.kind==='warning'?'command-warning':'')+'"><time>'+esc(new Date(e.ms).toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}))+'</time>'+ (i?'<div><span class="elapsed">+'+((e.ms-rows[i-1].ms)/1000).toFixed(1)+'s from previous step</span></div>':'')+'<h3>'+esc(e.stage)+'</h3><p>'+esc(e.detail)+'</p></article>').join('')||'No recorded steps yet. No test alarms are generated by this view.';
 }
 function service(name,text,detail,kind){$(name+'Status').textContent=text;$(name+'Status').className=kind;$(name+'Detail').textContent=detail}
 function chart(id,buckets,keys,online=false){
