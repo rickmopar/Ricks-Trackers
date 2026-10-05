@@ -339,8 +339,8 @@ def refresh_control_status(force=False):
         state["tracker_update_interval_sec"]=(current.get("location") or {}).get("interval_max")
         state["imu_sensitivity"]=motion
         state["imu_pending"]=(pending.get("imu_trig") or {}).get("motion")
-        desired="disable" if state["mode"]!="armed" else state.get("_armed_motion_sensitivity","high")
-        minimum=60 if state["mode"]=="armed" else 3600
+        desired=state.get("_armed_motion_sensitivity","high") if state["mode"] in ("armed","geofence") else "disable"
+        minimum=60 if state["mode"] in ("armed","geofence") else 3600
         desired_sleep="enable" if state["tasking_state"]=="storage" else "disable"
         acknowledged=(sleep==desired_sleep and motion==desired and
                       (current.get("location") or {}).get("interval_min")==minimum and
@@ -367,10 +367,12 @@ def refresh_control_status(force=False):
         state["mode_message"]=("Tracker settings confirmed" if state["mode_status"]=="confirmed" else
             ("Tracker is online; waiting for the requested mode settings to be confirmed." if state["device_online"] else
              "Waiting for tracker connection. A sleeping tracker checks in hourly."))
-    except Exception:
-        state["readiness"]="checking"
+    except Exception as exc:
+        state["readiness"]="not_ready"
         state["device_online"]=None
-        state["readiness_message"]="Readiness cannot be confirmed. Checking the tracker connection."
+        safe_detail=str(exc)[:240].replace(PARTICLE_ACCESS_TOKEN,"[redacted]") if PARTICLE_ACCESS_TOKEN else str(exc)[:240]
+        state["readiness_message"]="NOT READY — tracker readiness could not be confirmed. "+safe_detail
+        print("Readiness check failed: "+safe_detail)
         state["mode_status"]="unknown"
         state["mode_message"]="Cannot confirm tracker settings. Check the connection and retry."
 
@@ -725,7 +727,12 @@ def setmode(x:Mode, background_tasks:BackgroundTasks):
             message=label+" FAILED — "+reason+". Attempt "+str(attempt)+" of 3. "
             message+=("Retrying in 3 seconds." if retry else "Not confirmed. Please try again.")
             timeline(label+" FAILED",message,kind="warning")
-            print("Mode command failure: mode="+x.mode+" attempt="+str(attempt)+" status="+str(code)+" type="+type(exc).__name__)
+            raw_detail=(exc.detail if isinstance(exc,HTTPException) else str(exc))
+            safe_detail=str(raw_detail)[:500]
+            if PARTICLE_ACCESS_TOKEN: safe_detail=safe_detail.replace(PARTICLE_ACCESS_TOKEN,"[redacted]")
+            diagnostic="mode="+x.mode+" attempt="+str(attempt)+"/3 status="+str(code)+" type="+type(exc).__name__+" detail="+safe_detail
+            print("Mode command failure: "+diagnostic)
+            timeline(label+" DIAGNOSTIC",diagnostic,kind="warning")
             if state.get("_mode_request_id") is request_id:
                 state["command_warning"]=message
             if not retry:
@@ -733,6 +740,17 @@ def setmode(x:Mode, background_tasks:BackgroundTasks):
             time.sleep(3)
             if state.get("_mode_request_id") is request_id:
                 timeline(label+" RETRY","Automatic attempt "+str(attempt+1)+" of 3",kind="warning")
+
+@app.post("/api/trailer/resync")
+def resync_tracker_status():
+    """Discard stale presentation warnings and rebuild status from Particle/cloud truth."""
+    state["command_warning"]=None
+    state["_control_checked"]=0
+    state["_vitals_checked"]=0
+    refresh_control_status(force=True)
+    refresh_vitals(force=True)
+    timeline("STATUS RESYNC","Fresh tracker/control status requested",kind="mode")
+    return pub()
 
 @app.post("/api/trailer/geofence")
 def setgeo(x:Fence):
