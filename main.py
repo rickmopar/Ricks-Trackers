@@ -325,10 +325,14 @@ def read_imu_motion():
 
 def refresh_control_status(force=False):
     """Only acknowledged Particle configuration can confirm the requested mode."""
+    if state.get("_mode_submitting"):
+        return
     now=time.time()
     if not force and now-state.get("_control_checked",0)<15:
         return
     state["_control_checked"]=now
+    checked_mode=state["mode"]
+    checked_request=state.get("_mode_request_id")
     try:
         conf=get_particle_config().get("configuration") or {}
         current=conf.get("current") or {}
@@ -339,19 +343,33 @@ def refresh_control_status(force=False):
         state["tracker_update_interval_sec"]=(current.get("location") or {}).get("interval_max")
         state["imu_sensitivity"]=motion
         state["imu_pending"]=(pending.get("imu_trig") or {}).get("motion")
-        desired=state.get("_armed_motion_sensitivity","high") if state["mode"] in ("armed","geofence") else "disable"
+        desired="high" if state["mode"] in ("armed","geofence") else "disable"
         minimum=60 if state["mode"] in ("armed","geofence") else 3600
         desired_sleep="enable" if state["tasking_state"]=="storage" else "disable"
         acknowledged=(sleep==desired_sleep and motion==desired and
                       (current.get("location") or {}).get("interval_min")==minimum and
-                      (current.get("location") or {}).get("interval_max")==3600)
+                      (current.get("location") or {}).get("interval_max")==3600 and
+                      (current.get("location") or {}).get("lock_trigger") is False)
         changing=any((pending.get(module) or {}).get(key,current.get(module,{}).get(key))!=value
-                     for module,key,value in (("sleep","mode",desired_sleep),("imu_trig","motion",desired),("location","interval_min",minimum),("location","interval_max",3600)))
+                     for module,key,value in (("sleep","mode",desired_sleep),("imu_trig","motion",desired),("location","interval_min",minimum),("location","interval_max",3600),("location","lock_trigger",False)))
         result=requests.get(f"https://api.particle.io/v1/devices/{PARTICLE_DEVICE_ID}",
                             headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}"},timeout=10)
         result.raise_for_status()
+        if state.get("_mode_submitting") or state["mode"]!=checked_mode or state.get("_mode_request_id") is not checked_request:
+            return
         state["device_online"]=result.json().get("connected") is True
-        state["mode_status"]="confirmed" if acknowledged and not changing else "pending"
+        previous_status=state.get("mode_status")
+        confirmed=acknowledged and not changing and not state.get("_mode_failed") and (state["device_online"] or state["tasking_state"]=="storage")
+        state["mode_status"]="confirmed" if confirmed else "pending"
+        if confirmed:
+            state["last_confirmed_mode"]=state["mode"]
+            state["pending_mode"]=None
+        if previous_status!=state["mode_status"] or force:
+            elapsed=round(max(0,now-state.get("_mode_started",now)),2)
+            detail=f"mode={state['mode']} imu={desired} confirmed={confirmed} elapsed_sec={elapsed}"
+            print("Mode configuration verification: "+detail)
+            if previous_status!=state["mode_status"]:
+                timeline("CONFIGURATION CONFIRMED" if confirmed else "CONFIGURATION PENDING",detail,kind="mode")
         previous=state.get("readiness")
         if state["tasking_state"]=="storage":
             state["readiness"]="storage" if acknowledged and not changing else "storage_pending"
@@ -370,7 +388,7 @@ def refresh_control_status(force=False):
     except Exception as exc:
         state["readiness"]="not_ready"
         state["device_online"]=None
-        safe_detail=str(exc)[:240].replace(PARTICLE_ACCESS_TOKEN,"[redacted]") if PARTICLE_ACCESS_TOKEN else str(exc)[:240]
+        safe_detail=type(exc).__name__
         state["readiness_message"]="NOT READY — tracker readiness could not be confirmed. "+safe_detail
         print("Readiness check failed: "+safe_detail)
         state["mode_status"]="unknown"
@@ -422,10 +440,8 @@ def set_tracker_power_profile(mode,tasking_state=None):
         interval=3600
         motion="disable"
     elif mode=="armed":
-        # Security mode: keep the tracker reachable and restore the user's armed sensitivity.
-        desired=state.get("_armed_motion_sensitivity")
-        if desired not in ("low","medium","high"):
-            desired="high"
+        # Highest motion sensitivity supported by the existing Tracker profile.
+        desired="high"
         updated["sleep"]["mode"]="disable"
         updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
@@ -433,9 +449,7 @@ def set_tracker_power_profile(mode,tasking_state=None):
         motion=desired
     else:
         updated["sleep"]["mode"]="disable"
-        desired=state.get("_armed_motion_sensitivity")
-        if desired not in ("low","medium","high"):
-            desired="high"
+        desired="high"
         updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
         motion=desired
@@ -449,11 +463,14 @@ def set_tracker_power_profile(mode,tasking_state=None):
     updated["location"]["lock_trigger"]=False
     url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
     headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json","Content-Type":"application/json"}
+    print(f"Mode configuration requested: mode={mode} imu={updated['imu_trig']['motion']}")
     r=requests.put(url,headers=headers,json=updated,timeout=20)
+    timeline("CONFIGURATION SUBMITTED",f"mode={mode} imu={updated['imu_trig']['motion']} cloud_accepted={r.ok}",kind="mode" if r.ok else "warning")
     if not r.ok:
-        raise HTTPException(r.status_code,f"Particle power-profile update failed: {r.text[:260]}")
+        raise HTTPException(r.status_code,"Particle power-profile update rejected")
 
-    deliver_config_now(updated)
+    accepted=deliver_config_now(updated)
+    timeline("CONFIGURATION DELIVERY",f"mode={mode} direct_accepted={accepted}; acceptance is not confirmation",kind="mode")
     state["mode_status"]="pending"
     state["mode_message"]="Command submitted; waiting for the tracker to apply it."
     state["_control_checked"]=0
@@ -500,8 +517,7 @@ def imu_config():
 
 @app.post("/api/trailer/imu-sensitivity")
 def imu_sensitivity(x:ImuSensitivity):
-    actual=set_imu_motion(x.sensitivity)
-    return {"ok":True,"imu_sensitivity":actual,"imu_pending":state.get("imu_pending")}
+    raise HTTPException(409,"Motion sensitivity is automatic: HIGH for ARMED and GEOFENCE. Refresh the app.")
 @app.get("/api/trailer/status")
 def status():
     telegram_ready()
@@ -643,11 +659,6 @@ def ensure_alarm_poll_worker():
         )
         _alarm_poll_thread.start()
 
-def ping_after_arm():
-    if state["mode"]=="armed" and state.get("mode_status")=="confirmed":
-        try: request_fresh_location()
-        except Exception: print("Initial arm location request failed")
-
 @app.post("/api/trailer/tasking")
 def tasking(x:Tasking):
     if not _mode_change_lock.acquire(blocking=False):
@@ -680,8 +691,21 @@ def setmode_once(x:Mode, background_tasks:BackgroundTasks):
         refresh_control_status(force=True)
         if x.mode in ("armed","geofence") and state.get("readiness")!="ready":
             raise HTTPException(409,"Press START UP and wait for READY FOR TASKING before arming or selecting geofence.")
+        state["_mode_submitting"]=True
+        state["_mode_failed"]=False
+        state["_mode_started"]=time.time()
+        state["pending_mode"]=x.mode
+        state["mode_status"]="pending"
         timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
         set_tracker_power_profile(x.mode)
+        if x.mode in ("armed","geofence"):
+            timeline("IMMEDIATE LOCATION REQUEST", "mode="+x.mode,kind="mode")
+            try:
+                location_result=request_fresh_location()
+                location_ok=bool(location_result.get("ok"))
+            except Exception:
+                location_ok=False
+            timeline("IMMEDIATE LOCATION RESULT",f"mode={x.mode} accepted={location_ok}; GPS arrival is reported separately",kind="mode" if location_ok else "warning")
         try:
             save_selected_mode(x.mode)
         except Exception:
@@ -692,14 +716,18 @@ def setmode_once(x:Mode, background_tasks:BackgroundTasks):
             state["alarm_reason"]=None
             state["_motion_started"]=None
             state["_alarm_poll_next_at"]=None
+        state["_mode_submitting"]=False
         refresh_control_status(force=True)
         note("Mode changed",x.mode+" • "+state["mode_message"])
         timeline("MODE CONFIRMED" if state["mode_status"]=="confirmed" else "MODE PENDING",
                  x.mode.upper()+" • "+state["mode_message"],kind="mode")
-        if x.mode=="armed":
-            background_tasks.add_task(ping_after_arm)
         return pub()
+    except Exception:
+        state["_mode_failed"]=True
+        state["mode_status"]="unknown"
+        raise
     finally:
+        state["_mode_submitting"]=False
         _mode_change_lock.release()
 @app.post("/api/trailer/mode")
 def setmode(x:Mode, background_tasks:BackgroundTasks):
@@ -727,10 +755,7 @@ def setmode(x:Mode, background_tasks:BackgroundTasks):
             message=label+" FAILED — "+reason+". Attempt "+str(attempt)+" of 3. "
             message+=("Retrying in 3 seconds." if retry else "Not confirmed. Please try again.")
             timeline(label+" FAILED",message,kind="warning")
-            raw_detail=(exc.detail if isinstance(exc,HTTPException) else str(exc))
-            safe_detail=str(raw_detail)[:500]
-            if PARTICLE_ACCESS_TOKEN: safe_detail=safe_detail.replace(PARTICLE_ACCESS_TOKEN,"[redacted]")
-            diagnostic="mode="+x.mode+" attempt="+str(attempt)+"/3 status="+str(code)+" type="+type(exc).__name__+" detail="+safe_detail
+            diagnostic="mode="+x.mode+" attempt="+str(attempt)+"/3 status="+str(code)+" type="+type(exc).__name__
             print("Mode command failure: "+diagnostic)
             timeline(label+" DIAGNOSTIC",diagnostic,kind="warning")
             if state.get("_mode_request_id") is request_id:
@@ -745,6 +770,7 @@ def setmode(x:Mode, background_tasks:BackgroundTasks):
 def resync_tracker_status():
     """Discard stale presentation warnings and rebuild status from Particle/cloud truth."""
     state["command_warning"]=None
+    state["_mode_failed"]=False
     state["_control_checked"]=0
     state["_vitals_checked"]=0
     refresh_control_status(force=True)
