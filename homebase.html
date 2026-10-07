@@ -20,7 +20,7 @@
 @media(max-width:700px){.console-status,.charts{grid-template-columns:1fr 1fr}.charts{grid-template-columns:1fr}}
 
 .vitals-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.vital-chart{min-width:0}.vital-chart svg{width:100%;height:180px}.journey{max-height:600px;overflow:auto;padding:10px 10px 10px 24px}.step{position:relative;border-left:2px solid #294859;padding:0 0 24px 22px}.step:before{content:'';position:absolute;left:-6px;top:4px;width:10px;height:10px;border-radius:50%;background:#20c8d4}.step time{color:#a9bdcf;font:12px ui-monospace,monospace}.step h3{font-size:14px;margin:7px 0}.elapsed{display:inline-block;background:#173445;border-radius:5px;padding:3px 7px;font-size:11px;margin:5px 0}.step p{margin:4px 0;font-size:12px;color:#a9bdcf;overflow-wrap:anywhere}@media(max-width:650px){.vitals-grid{grid-template-columns:1fr}}
-.command-warning{background:#493b10!important;color:#ffe082!important;border:1px solid #f5c542;padding:12px;border-radius:10px}.row.command-warning,.step.command-warning{border-left:4px solid #f5c542}.confirmed{outline:2px solid #ff5063!important;background:#6b1f2b!important;color:#fff}.pending{outline:2px solid #f5c542!important;background:#493b10!important;color:#ffe082}.inactive{opacity:.82}.readiness-ready{color:#8df0b8}.readiness-pending{color:#ffe082}.readiness-notready{color:#ff8b98}</style>
+.command-warning{background:#493b10!important;color:#ffe082!important;border:1px solid #f5c542;padding:12px;border-radius:10px}.row.command-warning,.step.command-warning{border-left:4px solid #f5c542}.confirmed{outline:2px solid #ff5063!important;background:#6b1f2b!important;color:#fff}.pending{outline:2px solid #f5c542!important;background:#493b10!important;color:#ffe082}.inactive{opacity:.82}.readiness-ready{color:#8df0b8}.readiness-pending{color:#ffe082}.readiness-notready{color:#ff8b98}.imus button.active{outline:2px solid #4d9cff;background:#1f5f91}.imus{display:flex;gap:8px}.imus button{flex:1}</style>
 </head>
 <body><div class="wrap">
 <div class="top">
@@ -84,7 +84,7 @@
       <button id="moff" onclick="mode('off')">TRAVEL / OFF</button>
       <button onclick="ping()">PING TRACKER</button>
       <button class="danger" onclick="clearAlarm()">CLEAR ALARM</button>
-    </div>
+    </div><div class="card"><b>Motion sensitivity</b><div class="actions imus"><button id="ilow" onclick="imu('low')">LOW</button><button id="imedium" onclick="imu('medium')">MEDIUM</button><button id="ihigh" onclick="imu('high')">HIGH</button></div><div class="small" id="sensitivityStatus">Used by ARMED and GEOFENCE. High detects smaller movements.</div></div>
     <div id="map"></div>
     <div class="actions"><button onclick="centerTracker()">TRACK TRAILER</button><button onclick="resync()">RESYNC</button><button onclick="showRoute()">STATUS / HISTORY</button></div>
     <div style="margin-top:12px"><a id="googleLocation" target="_blank" rel="noopener noreferrer" hidden style="display:inline-block;padding:12px;border:1px solid #31445f;border-radius:12px;font-weight:700">View location in Google Maps</a><span id="googleLocationWaiting" class="small">Waiting for a GPS location</span></div>
@@ -127,7 +127,10 @@ $('readyDetail').textContent=s.readiness_message||'Waiting for tracker confirmat
 const warning=s.command_warning||commandError;
 $('controlStatus').textContent=warning||(modeBusy?'Sending command…':(s.mode_message||'Checking tracker settings'));
 $('controlStatus').classList.toggle('command-warning',Boolean(warning));
-renderModeButtons(s);let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
+renderModeButtons(s);
+ ['low','medium','high'].forEach(x=>{$('i'+x).classList.toggle('active',s.selected_sensitivity===x);$('i'+x).disabled=modeBusy});
+ $('sensitivityStatus').textContent='Selected: '+(s.selected_sensitivity||'high').toUpperCase()+' • '+(s.mode==='off'?'Saved for ARMED / GEOFENCE':('Tracker: '+(s.imu_sensitivity||'unknown').toUpperCase()+(s.mode_status==='confirmed'?' • confirmed':' • awaiting confirmation')));
+let p=$('pill');p.textContent=s.alarm?'ALARM':s.mode_status==='unknown'?'UNCONFIRMED':s.mode_status!=='confirmed'?'PENDING':s.mode==='off'?'OFF':s.mode==='geofence'?'GEOFENCE':'ARMED';p.className='pill '+(s.alarm?'alarm':s.mode_status!=='confirmed'||s.mode==='off'?'off':'secure');
 if(map&&hasLocation){if(!marker){marker=L.marker([s.lat,s.lon]).addTo(map);map.setView([s.lat,s.lon],15)}else marker.setLatLng([s.lat,s.lon])}}
 function centerTracker(){if(map&&marker)map.setView(marker.getLatLng(),15)}
 function showRoute(){if(map&&path&&path.getLatLngs().length)map.fitBounds(path.getBounds(),{padding:[20,20],maxZoom:16})}
@@ -171,6 +174,15 @@ async function mode(x){
  try{const result=await api('/api/trailer/mode',{method:'POST',body:JSON.stringify({mode:x})});modeBusy=false;requestedMode=null;renderLive(result)}
  catch(e){commandError='Command failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}
  finally{modeBusy=false;['armed','geofence','off'].forEach(v=>$('m'+v).disabled=v!=='off'&&latestReadiness!=='ready')}
+}
+async function imu(x){
+ if(modeBusy)return;
+ modeBusy=true;commandError=null;
+ ['low','medium','high'].forEach(v=>$('i'+v).disabled=true);
+ $('sensitivityStatus').textContent='Setting '+x.toUpperCase()+'…';
+ try{const result=await api('/api/trailer/imu-sensitivity',{method:'POST',body:JSON.stringify({sensitivity:x})});modeBusy=false;renderLive(result)}
+ catch(e){commandError='Sensitivity failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}
+ finally{modeBusy=false;['low','medium','high'].forEach(v=>$('i'+v).disabled=false)}
 }
 async function resync(){if(modeBusy)return;modeBusy=true;commandError=null;requestedMode=null;$('controlStatus').textContent='Resyncing tracker status…';try{const result=await api('/api/trailer/resync',{method:'POST',body:'{}'});renderLive(result)}catch(e){commandError='Resync failed: '+e.message;$('controlStatus').textContent=commandError;$('controlStatus').classList.add('command-warning')}finally{modeBusy=false}}
 async function ping(){try{await api('/api/trailer/ping',{method:'POST',body:'{}'});setTimeout(refresh,2500);setTimeout(refresh,7000)}catch(e){alert(e.message)}}

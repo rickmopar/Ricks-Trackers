@@ -95,9 +95,28 @@ class ModeFlowTests(unittest.TestCase):
         self.assertEqual(app.state['last_confirmed_mode'],'off')
         self.assertNotEqual(app.state['mode_status'],'confirmed')
         self.assertIn('FAILED',app.state['command_warning'])
-    def test_old_selector_rejected_without_config_write(self):
-        self.assertEqual(self.client.post('/api/trailer/imu-sensitivity',json={'sensitivity':'low'}).status_code,409)
+    def test_sensitivity_saved_off_without_device_write(self):
+        with patch.object(app.psycopg,'connect'):
+            r=self.client.post('/api/trailer/imu-sensitivity',json={'sensitivity':'low'})
+        self.assertEqual(r.status_code,200,r.text)
+        self.assertEqual(r.json()['selected_sensitivity'],'low')
         self.assertEqual(self.sent,[])
+    def test_each_sensitivity_applied_in_both_security_modes(self):
+        self.apply=True
+        for mode in ('armed','geofence'):
+            self.client.post('/api/trailer/mode',json={'mode':mode})
+            for sensitivity in ('low','medium','high'):
+                with patch.object(app.psycopg,'connect'):
+                    r=self.client.post('/api/trailer/imu-sensitivity',json={'sensitivity':sensitivity})
+                self.assertEqual(r.status_code,200,r.text)
+                self.assertEqual(self.sent[-1]['imu_trig']['motion'],sensitivity)
+                self.assertEqual(r.json()['mode_status'],'confirmed')
+                self.assertEqual(r.json()['mode'],mode)
+    def test_saved_sensitivity_used_when_arming(self):
+        with patch.object(app.psycopg,'connect'):
+            self.client.post('/api/trailer/imu-sensitivity',json={'sensitivity':'medium'})
+        self.client.post('/api/trailer/mode',json={'mode':'armed'})
+        self.assertEqual(self.sent[-1]['imu_trig']['motion'],'medium')
     def test_manual_ping_and_resync_preserved(self):
         with patch.object(app,'request_fresh_location',return_value={'ok':True}) as ping:
             self.assertEqual(self.client.post('/api/trailer/ping').status_code,200)

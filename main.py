@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")
 PARTICLE_ACCESS_TOKEN=os.getenv("PARTICLE_ACCESS_TOKEN","")
 PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
-state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high"}
+state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high","selected_sensitivity":"high"}
 
 state.update({"tasking_state":"ready","readiness":"checking","readiness_message":"Checking tracker readiness","device_online":None,"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
 _mode_change_lock=threading.Lock()
@@ -75,6 +75,7 @@ def history_init():
                 cur.execute("CREATE INDEX IF NOT EXISTS tracker_history_category_idx ON tracker_history(category)")
                 cur.execute("CREATE TABLE IF NOT EXISTS tracker_settings (id INTEGER PRIMARY KEY CHECK (id=1), mode TEXT NOT NULL CHECK (mode IN ('off','armed','geofence')))")
                 cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS tasking_state TEXT NOT NULL DEFAULT 'ready'")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'high'")
         _history_db_ready=True
         _history_db_error=None
         return True
@@ -121,7 +122,7 @@ def restore_selected_mode():
         raise RuntimeError("Cannot safely restore tracker mode: database unavailable")
     with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT mode,tasking_state FROM tracker_settings WHERE id=1")
+            cur.execute("SELECT mode,tasking_state,sensitivity FROM tracker_settings WHERE id=1")
             row=cur.fetchone()
             if not row:
                 # Migrate the last explicit user selection, never a server-start default.
@@ -131,6 +132,7 @@ def restore_selected_mode():
             if restored not in ("off","armed","geofence"):
                 raise RuntimeError("Saved tracker mode is invalid")
             cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",(restored,))
+    state["selected_sensitivity"]=row[2] if row and len(row)>2 and row[2] in ("low","medium","high") else "high"
     state["mode"]=restored
     state["tasking_state"]=row[1] if row and len(row)>1 and row[1] in ("ready","storage") else "ready"
     if state["tasking_state"]=="storage": state["mode"]="off"
@@ -343,7 +345,7 @@ def refresh_control_status(force=False):
         state["tracker_update_interval_sec"]=(current.get("location") or {}).get("interval_max")
         state["imu_sensitivity"]=motion
         state["imu_pending"]=(pending.get("imu_trig") or {}).get("motion")
-        desired="high" if state["mode"] in ("armed","geofence") else "disable"
+        desired=state.get("selected_sensitivity","high") if state["mode"] in ("armed","geofence") else "disable"
         minimum=60 if state["mode"] in ("armed","geofence") else 3600
         desired_sleep="enable" if state["tasking_state"]=="storage" else "disable"
         acknowledged=(sleep==desired_sleep and motion==desired and
@@ -440,8 +442,8 @@ def set_tracker_power_profile(mode,tasking_state=None):
         interval=3600
         motion="disable"
     elif mode=="armed":
-        # Highest motion sensitivity supported by the existing Tracker profile.
-        desired="high"
+        # Apply the user-selected motion sensitivity for security modes.
+        desired=state.get("selected_sensitivity","high")
         updated["sleep"]["mode"]="disable"
         updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
@@ -449,7 +451,7 @@ def set_tracker_power_profile(mode,tasking_state=None):
         motion=desired
     else:
         updated["sleep"]["mode"]="disable"
-        desired="high"
+        desired=state.get("selected_sensitivity","high")
         updated["imu_trig"]["motion"]=desired
         sleep_state="disable"
         motion=desired
@@ -479,30 +481,32 @@ def set_tracker_power_profile(mode,tasking_state=None):
     return True
 
 def set_imu_motion(sensitivity):
-    doc=get_particle_config()
-    conf=doc.get("configuration") or {}
-    current=conf.get("current") or {}
-    if not isinstance(current,dict) or not current:
-        raise HTTPException(502,"Particle current configuration is missing")
-    updated=requests.models.complexjson.loads(requests.models.complexjson.dumps(current))
-    updated.setdefault("imu_trig",{})["motion"]=sensitivity
-    url=f"https://api.particle.io/v1/products/46064/config/{PARTICLE_DEVICE_ID}"
-    headers={"Authorization":f"Bearer {PARTICLE_ACCESS_TOKEN}","Accept":"application/json","Content-Type":"application/json"}
-    r=requests.put(url,headers=headers,json=updated,timeout=20)
-    if not r.ok:
-        raise HTTPException(r.status_code,f"Particle IMU update failed: {r.text[:260]}")
-    deliver_config_now({"imu_trig":updated["imu_trig"]})
-    state["_armed_motion_sensitivity"]=sensitivity
-    state["imu_sensitivity"]=sensitivity
-    state["imu_pending"]=sensitivity
-    time.sleep(1)
-    actual=read_imu_motion()
-    confirmed=(state.get("imu_sensitivity")==sensitivity)
-    queued=(state.get("imu_pending")==sensitivity)
-    if not (confirmed or queued):
-        raise HTTPException(502,f"Particle did not accept {sensitivity} sensitivity")
-    note("Motion sensitivity changed",sensitivity.upper() + (" (pending device apply)" if queued and not confirmed else ""))
-    return sensitivity
+    if not _mode_change_lock.acquire(blocking=False):
+        raise HTTPException(409,"Another tracker command is in progress. Please wait.")
+    try:
+        with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO tracker_settings (id,mode,tasking_state,sensitivity) VALUES (1,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET sensitivity=EXCLUDED.sensitivity",(state["mode"],state["tasking_state"],sensitivity))
+        state["selected_sensitivity"]=sensitivity
+        if state["mode"] in ("armed","geofence"):
+            state["_mode_submitting"]=True
+            state["mode_status"]="pending"
+            state["_mode_started"]=time.time()
+            set_tracker_power_profile(state["mode"])
+            state["_mode_failed"]=False
+        state["_mode_submitting"]=False
+        refresh_control_status(force=True)
+        note("Motion sensitivity selected",sensitivity.upper()+" • "+("saved for next security mode" if state["mode"]=="off" else state["mode_message"]))
+        return pub()
+    except Exception:
+        state["command_warning"]="Sensitivity update failed. Selected setting may be saved, but tracker application is not confirmed. Retry the sensitivity selection."
+        state["_mode_failed"]=True
+        state["mode_status"]="unknown"
+        timeline("SENSITIVITY FAILED",state["command_warning"],kind="warning")
+        raise HTTPException(502,state["command_warning"])
+    finally:
+        state["_mode_submitting"]=False
+        _mode_change_lock.release()
 
 @app.get("/api/trailer/imu-config")
 def imu_config():
@@ -517,7 +521,9 @@ def imu_config():
 
 @app.post("/api/trailer/imu-sensitivity")
 def imu_sensitivity(x:ImuSensitivity):
-    raise HTTPException(409,"Motion sensitivity is automatic: HIGH for ARMED and GEOFENCE. Refresh the app.")
+    result=set_imu_motion(x.sensitivity)
+    state["command_warning"]=None
+    return pub()
 @app.get("/api/trailer/status")
 def status():
     telegram_ready()

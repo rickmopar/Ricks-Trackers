@@ -36,10 +36,10 @@ for(const page of ['index.html','homebase.html']){
   vm.runInContext("renderModeButtons({mode:'armed',mode_status:'confirmed',command_warning:'Failed'})",t.ctx);
   assert(!t.elements.marmed.classList.contains('confirmed'));
  });
- test(`${page}: yellow/red CSS and sensitivity selector removed`,()=>{
+ test(`${page}: yellow/red CSS and sensitivity selector available`,()=>{
   assert.match(html,/(?:\.mode)?\.pending\{[^}]*background:#493b10/);
   assert.match(html,/(?:\.mode)?\.confirmed\{[^}]*background:#6b1f2b/);
-  assert(!/onclick="imu\(/.test(html));
-  assert(!/id="i(low|medium|high)"/.test(html));
+  assert(/onclick="imu\(/.test(html));
+  for(const level of ["low","medium","high"]) assert(html.includes(`id="i${level}"`));
  });
 }
