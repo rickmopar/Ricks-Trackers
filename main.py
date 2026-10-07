@@ -1032,7 +1032,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     else:
         state["_motion_started"]=None
 
-    if state["mode"] in ("armed","geofence") and state["home_lat"] is not None:
+    if state["mode"]=="geofence" and state["home_lat"] is not None:
         if miles(state["home_lat"],state["home_lon"],x.lat,x.lon)*5280>state["geofence_ft"]:
             alarm(f"Trailer left the {state['geofence_ft']} ft geofence",f"geo-{state['geofence_ft']}")
 
