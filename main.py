@@ -12,6 +12,12 @@ monitor = Monitor()
 vitals = Vitals()
 
 app=FastAPI(title="Rick's Trackers")
+SOFTWARE_VERSION="2026.10.07.1"
+
+@app.get("/api/version")
+def software_version():
+    return {"version":SOFTWARE_VERSION,"revision":os.getenv("RENDER_GIT_COMMIT","")[:7]}
+
 TOKEN=os.getenv("PARTICLE_WEBHOOK_TOKEN","")
 TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","")
 TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","")

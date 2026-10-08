@@ -24,7 +24,7 @@
 </head>
 <body><div class="wrap">
 <div class="top">
-  <div><div class="brand">Rick's Trackers • Home Base</div><div class="small">Car Trailer • live status + complete history</div></div>
+  <div><div class="brand">Rick's Trackers • Home Base</div><div class="small" id="softwareVersion" style="font-size:11px;margin-top:4px">Software version: checking…</div><div class="small">Car Trailer • live status + complete history</div></div>
   <div><a href="/">← PHONE APP</a> &nbsp; <span id="conn" class="small">Connecting…</span></div>
 </div>
 
@@ -243,4 +243,8 @@ async function refreshConsole(){
 refresh();setInterval(refresh,10000);refreshConsole();setInterval(()=>{if(!document.hidden)refreshConsole()},15000);
 
 </script>
-</body></html>
+<script>
+fetch('/api/version',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{
+ document.getElementById('softwareVersion').textContent='Software v'+v.version+(v.revision?' • '+v.revision:'');
+}).catch(()=>{document.getElementById('softwareVersion').textContent='Software version unavailable'});
+</script></body></html>
