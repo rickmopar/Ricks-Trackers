@@ -19,7 +19,7 @@ class ControlTests(unittest.TestCase):
         def put(*args,**kwargs):
             self.sent.append(kwargs['json'])
             return SimpleNamespace(ok=True)
-        self.env={'state':{'mode':'off','tasking_state':'ready','_armed_motion_sensitivity':'high'},'time':SimpleNamespace(time=lambda:100),
+        self.env={'state':{'mode':'off','tasking_state':'ready','home_lat':40,'home_lon':-75,'_armed_motion_sensitivity':'high'},'time':SimpleNamespace(time=lambda:100),
                   'get_particle_config':lambda:{'configuration':{'current':copy.deepcopy(self.config),'pending':copy.deepcopy(self.pending)}},
                   'requests':SimpleNamespace(models=SimpleNamespace(complexjson=json),put=put,get=lambda *a,**k:SimpleNamespace(raise_for_status=lambda:None,json=lambda:{"connected":self.online})),
                   'PARTICLE_DEVICE_ID':'test','PARTICLE_ACCESS_TOKEN':'test','note':lambda *args:None,'timeline':lambda *a,**k:None,'deliver_config_now':lambda updated:False}

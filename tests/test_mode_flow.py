@@ -20,7 +20,9 @@ class ModeFlowTests(unittest.TestCase):
             return SimpleNamespace(ok=True)
         def location():
             self.assertEqual(app.state['mode_status'],'pending')
-            self.sequence.append('location');return {'ok':True}
+            self.sequence.append('location')
+            if self.apply:app.state.update(home_lat=40.0,home_lon=-75.0,center_pending=False)
+            return {'ok':True}
         self.location=Mock(side_effect=location)
         patches=[patch.object(app.requests.sessions.Session,'request',side_effect=AssertionError('Real network forbidden')),
                  patch.object(app,'get_particle_config',side_effect=lambda:{'configuration':{'current':self.current,'pending':self.pending}}),
@@ -37,7 +39,7 @@ class ModeFlowTests(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.text)
             self.assertEqual(response.json()['mode_status'],'pending')
             self.assertEqual(self.sent[-1]['imu_trig']['motion'],'high')
-            self.assertEqual(self.sequence[-2:],['config','location'])
+            self.assertEqual(self.sequence[-2:],['location','config'])
         self.assertEqual(self.location.call_count,2)
     def test_actual_profile_and_online_required(self):
         for mode in ('armed','geofence'):
@@ -52,7 +54,7 @@ class ModeFlowTests(unittest.TestCase):
         self.client.post('/api/trailer/mode',json={'mode':'armed'})
         self.current=copy.deepcopy(self.sent[-1]);self.pending={'imu_trig':{'motion':'disable'}}
         app.refresh_control_status(force=True);self.assertEqual(app.state['mode_status'],'pending')
-        self.pending={};app.refresh_control_status(force=True)
+        self.pending={};app.state.update(home_lat=40.0,home_lon=-75.0,center_pending=False);app.refresh_control_status(force=True)
         self.assertEqual(app.state['mode_status'],'confirmed')
         self.assertIsNone(app.state['pending_mode'])
     def test_refresh_cannot_confirm_during_submission(self):
@@ -128,12 +130,12 @@ class ModeFlowTests(unittest.TestCase):
         self.assertIsNone(r.json()['command_warning'])
         self.assertEqual(r.json()['mode_status'],'confirmed')
     def test_geofence_motion_inside_no_alarm_outside_alarms(self):
-        app.state.update(mode='geofence',mode_status='confirmed',home_lat=40.0,home_lon=-75.0)
+        app.state.update(mode='geofence',mode_status='confirmed',home_lat=40.0,home_lon=-75.0,center_requested_at=0)
         with patch.object(app,'TOKEN','test'):
-            r=self.client.post('/api/particle/webhook',headers={'Authorization':'Bearer test'},json={'lat':40.0,'lon':-75.0,'motion':True})
+            r=self.client.post('/api/particle/webhook',headers={'Authorization':'Bearer test'},json={'lat':40.0,'lon':-75.0,'motion':True,'lck':1,'time':app.time.time(),'timestamp':app.datetime.now(app.timezone.utc).isoformat()})
             self.assertEqual(r.status_code,200)
             self.assertFalse(app.state['alarm'])
-            r=self.client.post('/api/particle/webhook',headers={'Authorization':'Bearer test'},json={'lat':41.0,'lon':-75.0,'motion':True})
+            r=self.client.post('/api/particle/webhook',headers={'Authorization':'Bearer test'},json={'lat':41.0,'lon':-75.0,'motion':True,'lck':1,'time':app.time.time(),'timestamp':app.datetime.now(app.timezone.utc).isoformat()})
             self.assertEqual(r.status_code,200)
             self.assertTrue(app.state['alarm'])
     def test_clear_stops_next_worker_ping(self):
@@ -142,3 +144,39 @@ class ModeFlowTests(unittest.TestCase):
         stop=Mock();stop.is_set.side_effect=[False,True]
         with patch.object(app,'_alarm_poll_stop',stop),patch.object(app,'_alarm_poll_wake'),patch.object(app,'request_fresh_location') as ping:
             app.alarm_poll_worker();ping.assert_not_called()
+    def test_activation_waits_for_fresh_center_despite_profile_ack(self):
+        self.apply=True
+        # Accept config immediately, but don't simulate a GPS response yet.
+        self.location.side_effect=lambda:{'ok':True}
+        app.state.update(home_lat=30.0,home_lon=-80.0)
+        r=self.client.post('/api/trailer/mode',json={'mode':'geofence'})
+        self.assertEqual(r.status_code,200)
+        self.assertEqual(r.json()['mode_status'],'pending')
+        self.assertTrue(r.json()['center_pending'])
+        started=app.state['center_requested_at']
+        def report(t,lock,lat=40.0):
+            with patch.object(app,'TOKEN','test'),patch.object(app,'save_center'):
+                return self.client.post('/api/particle/webhook',headers={'Authorization':'Bearer test'},json={'cmd':'loc','time':t,'loc':{'lat':lat,'lon':-75.0,'lck':lock,'time':t}})
+        report(started-60,1)
+        self.assertTrue(app.state['center_pending']);self.assertFalse(app.state['alarm'])
+        report(started,0)
+        self.assertTrue(app.state['center_pending']);self.assertFalse(app.state['alarm'])
+        report(started,1)
+        self.assertFalse(app.state['center_pending']);self.assertFalse(app.state['alarm'])
+        self.assertEqual(app.state['home_lat'],40.0)
+        app.refresh_control_status(force=True)
+        self.assertEqual(app.state['mode_status'],'confirmed')
+        report(started-60,1,30.0) # A late old location must not trip the new fence.
+        self.assertFalse(app.state['alarm'])
+        report(started,1,41.0)
+        self.assertTrue(app.state['alarm'])
+    def test_armed_also_waits_for_new_center(self):
+        self.apply=True;self.location.side_effect=lambda:{'ok':True}
+        r=self.client.post('/api/trailer/mode',json={'mode':'armed'})
+        self.assertTrue(r.json()['center_pending'])
+        self.assertEqual(r.json()['mode_status'],'pending')
+    def test_center_database_failure_keeps_geofence_pending(self):
+        app.state.update(center_pending=True,center_requested_at=app.time.time())
+        with patch.object(app,'save_center',side_effect=RuntimeError('database')):
+            app.capture_requested_center(app.Event(lat=40,lon=-75),app.datetime.now(app.timezone.utc).isoformat())
+        self.assertTrue(app.state['center_pending'])

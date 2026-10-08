@@ -20,6 +20,7 @@ PARTICLE_DEVICE_ID=os.getenv("PARTICLE_DEVICE_ID","")
 HISTORY_DATABASE_URL=os.getenv("HISTORY_DATABASE_URL") or os.getenv("DATABASE_URL") or ""
 state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEVICE_ID),"mode":"off","geofence_ft":1000,"live":False,"alarm":False,"alarm_reason":None,"lat":None,"lon":None,"home_lat":None,"home_lon":None,"speed_mph":0,"battery_percent":None,"external_power":None,"lte":None,"lte_quality":None,"network_type":None,"gps_fix":None,"imu_sensitivity":None,"imu_pending":None,"tracker_sleep":None,"tracker_update_interval_sec":None,"last_seen":None,"vitals_updated_at":None,"route":[],"events":[],"timeline":[],"telegram_configured":False,"last_alert_at":None,"telegram_chat_id":TELEGRAM_CHAT_ID or None,"_key":None,"_epoch":0,"_motion_started":None,"_vitals_checked":0,"_last_motion_device_time":None,"_last_motion_published_at":None,"_last_motion_webhook_at":None,"_alarm_poll_next_at":None,"_armed_motion_sensitivity":"high","selected_sensitivity":"high"}
 
+state.update({"center_pending":False,"center_requested_at":None})
 state.update({"tasking_state":"ready","readiness":"checking","readiness_message":"Checking tracker readiness","device_online":None,"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
 _mode_change_lock=threading.Lock()
 
@@ -76,6 +77,10 @@ def history_init():
                 cur.execute("CREATE TABLE IF NOT EXISTS tracker_settings (id INTEGER PRIMARY KEY CHECK (id=1), mode TEXT NOT NULL CHECK (mode IN ('off','armed','geofence')))")
                 cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS tasking_state TEXT NOT NULL DEFAULT 'ready'")
                 cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'high'")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS home_lat DOUBLE PRECISION")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS home_lon DOUBLE PRECISION")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS center_requested_at DOUBLE PRECISION")
+                cur.execute("ALTER TABLE tracker_settings ADD COLUMN IF NOT EXISTS center_pending BOOLEAN NOT NULL DEFAULT FALSE")
         _history_db_ready=True
         _history_db_error=None
         return True
@@ -115,14 +120,14 @@ def save_selected_mode(mode,tasking_state=None):
     # A successful mode change must survive server restarts.
     with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO tracker_settings (id,mode,tasking_state) VALUES (1,%s,%s) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode,tasking_state=EXCLUDED.tasking_state",(mode,tasking_state or state["tasking_state"]))
+            cur.execute("INSERT INTO tracker_settings (id,mode,tasking_state,home_lat,home_lon,center_requested_at,center_pending) VALUES (1,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET mode=EXCLUDED.mode,tasking_state=EXCLUDED.tasking_state,home_lat=EXCLUDED.home_lat,home_lon=EXCLUDED.home_lon,center_requested_at=EXCLUDED.center_requested_at,center_pending=EXCLUDED.center_pending",(mode,tasking_state or state["tasking_state"],state.get("home_lat"),state.get("home_lon"),state.get("center_requested_at"),state.get("center_pending",False)))
 
 def restore_selected_mode():
     if not _history_db_ready:
         raise RuntimeError("Cannot safely restore tracker mode: database unavailable")
     with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT mode,tasking_state,sensitivity FROM tracker_settings WHERE id=1")
+            cur.execute("SELECT mode,tasking_state,sensitivity,home_lat,home_lon,center_requested_at,center_pending FROM tracker_settings WHERE id=1")
             row=cur.fetchone()
             if not row:
                 # Migrate the last explicit user selection, never a server-start default.
@@ -133,6 +138,8 @@ def restore_selected_mode():
                 raise RuntimeError("Saved tracker mode is invalid")
             cur.execute("INSERT INTO tracker_settings (id,mode) VALUES (1,%s) ON CONFLICT (id) DO NOTHING",(restored,))
     state["selected_sensitivity"]=row[2] if row and len(row)>2 and row[2] in ("low","medium","high") else "high"
+    if row and len(row)>=7:
+        state.update(home_lat=row[3],home_lon=row[4],center_requested_at=row[5],center_pending=row[6])
     state["mode"]=restored
     state["tasking_state"]=row[1] if row and len(row)>1 and row[1] in ("ready","storage") else "ready"
     if state["tasking_state"]=="storage": state["mode"]="off"
@@ -361,7 +368,8 @@ def refresh_control_status(force=False):
             return
         state["device_online"]=result.json().get("connected") is True
         previous_status=state.get("mode_status")
-        confirmed=acknowledged and not changing and not state.get("_mode_failed") and (state["device_online"] or state["tasking_state"]=="storage")
+        center_ready=state["mode"]=="off" or (not state.get("center_pending") and state.get("home_lat") is not None and state.get("home_lon") is not None)
+        confirmed=center_ready and acknowledged and not changing and not state.get("_mode_failed") and (state["device_online"] or state["tasking_state"]=="storage")
         state["mode_status"]="confirmed" if confirmed else "pending"
         if confirmed:
             state["last_confirmed_mode"]=state["mode"]
@@ -387,6 +395,8 @@ def refresh_control_status(force=False):
         state["mode_message"]=("Tracker settings confirmed" if state["mode_status"]=="confirmed" else
             ("Tracker is online; waiting for the requested mode settings to be confirmed." if state["device_online"] else
              "Waiting for tracker connection. A sleeping tracker checks in hourly."))
+        if not center_ready:
+            state["mode_message"]="Waiting for a fresh GPS fix to set the new center. Geofence alarms are paused; use PING TRACKER to retry."
     except Exception as exc:
         state["readiness"]="not_ready"
         state["device_online"]=None
@@ -703,7 +713,11 @@ def setmode_once(x:Mode, background_tasks:BackgroundTasks):
         state["pending_mode"]=x.mode
         state["mode_status"]="pending"
         timeline("MODE REQUESTED", "User requested "+x.mode.upper(), kind="mode")
-        set_tracker_power_profile(x.mode)
+        if x.mode in ("armed","geofence"):
+            state["center_pending"]=True
+            state["center_requested_at"]=time.time()
+        else:
+            state["center_pending"]=False
         if x.mode in ("armed","geofence"):
             timeline("IMMEDIATE LOCATION REQUEST", "mode="+x.mode,kind="mode")
             try:
@@ -712,6 +726,7 @@ def setmode_once(x:Mode, background_tasks:BackgroundTasks):
             except Exception:
                 location_ok=False
             timeline("IMMEDIATE LOCATION RESULT",f"mode={x.mode} accepted={location_ok}; GPS arrival is reported separately",kind="mode" if location_ok else "warning")
+        set_tracker_power_profile(x.mode)
         try:
             save_selected_mode(x.mode)
         except Exception:
@@ -818,6 +833,10 @@ def testsms_compat():
 @app.post("/api/trailer/set-home")
 def sethome():
     if state["lat"] is None or state["lon"] is None: raise HTTPException(409,"No live tracker position yet")
+    if not state.get("gps_fix") or state.get("center_pending"):
+        raise HTTPException(409,"Wait for a fresh GPS fix before setting home.")
+    state["center_requested_at"]=time.time()
+    save_center(state["lat"],state["lon"])
     state["home_lat"],state["home_lon"]=state["lat"],state["lon"]
     note("Home position set","Current tracker position")
     return pub()
@@ -830,6 +849,37 @@ def clear():
     note("Alarm cleared","Returned to monitoring • automatic location polling stopped")
     timeline("ALARM CLEARED","Automatic 60-second location polling stopped",kind="mode")
     return pub()
+def fresh_center_sample(report_time):
+    """Reject delayed or undated positions for a newly requested center/boundary."""
+    requested=state.get("center_requested_at")
+    if requested is None or not report_time:
+        return False
+    try:
+        sample=datetime.fromisoformat(report_time.replace("Z","+00:00")).timestamp()
+        return math.floor(requested)<=sample<=time.time()+30
+    except (TypeError,ValueError):
+        return False
+
+def save_center(lat,lon):
+    with psycopg.connect(HISTORY_DATABASE_URL,connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE tracker_settings SET home_lat=%s,home_lon=%s,center_requested_at=%s,center_pending=FALSE WHERE id=1",(lat,lon,state.get("center_requested_at")))
+
+def capture_requested_center(x,report_time):
+    if not state.get("center_pending") or not x.gps_fix or not fresh_center_sample(report_time):
+        return
+    if not (-90<=x.lat<=90 and -180<=x.lon<=180):
+        return
+    try:
+        save_center(x.lat,x.lon)
+    except Exception:
+        timeline("CENTER SAVE FAILED","Fresh fix received; center could not be saved. Geofence remains pending.",kind="warning")
+        return
+    state["home_lat"],state["home_lon"]=x.lat,x.lon
+    state["center_pending"]=False
+    state["_control_checked"]=0
+    timeline("NEW CENTER CONFIRMED","Fresh GPS fix received for this activation; geofence center saved",kind="mode")
+
 @app.post("/api/particle/webhook")
 async def webhook(request:Request,authorization:Optional[str]=Header(default=None)):
     auth_webhook(authorization)
@@ -963,13 +1013,13 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         report_time=device_event_time or published_at
         report_source="tracker timestamp" if device_event_time else "Particle publish timestamp (tracker time unavailable)"
 
-        lock=loc.get("lck",loc.get("lock",loc.get("fix",True)))
+        lock=loc.get("lck",loc.get("lock",loc.get("fix",False)))
         x=Event(
             lat=lat,lon=lon,speed_mph=speed_mph,
             battery_percent=batt_pct,
             external_power=None,
             lte=lte,
-            gps_fix=bool(lock),
+            gps_fix=lock in (True,1,"1"),
             motion=imu_motion,
             alarm=False,alarm_reason=None,timestamp=timestamp
         )
@@ -1011,9 +1061,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
         event_time=state["last_seen"],lat=x.lat,lon=x.lon,speed_mph=x.speed_mph,
         battery_percent=x.battery_percent,external_power=x.external_power,lte=x.lte,gps_fix=x.gps_fix
     )
-    if state["home_lat"] is None:
-        state["home_lat"],state["home_lon"]=x.lat,x.lon
-        note("Home position set","First valid tracker position")
+    capture_requested_center(x,report_time or x.timestamp)
 
     if x.alarm: alarm(x.alarm_reason or "Tracker alarm","device-alarm")
 
@@ -1032,7 +1080,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     else:
         state["_motion_started"]=None
 
-    if state["mode"]=="geofence" and state["home_lat"] is not None:
+    if state["mode"]=="geofence" and not state.get("center_pending") and state["home_lat"] is not None and x.gps_fix and fresh_center_sample(report_time or x.timestamp):
         if miles(state["home_lat"],state["home_lon"],x.lat,x.lon)*5280>state["geofence_ft"]:
             alarm(f"Trailer left the {state['geofence_ft']} ft geofence",f"geo-{state['geofence_ft']}")
 
