@@ -1,4 +1,5 @@
-import os, math, time, hmac, requests, threading
+import os, math, time, hmac, requests, threading, hashlib, json
+from collections import OrderedDict
 import psycopg
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -12,7 +13,7 @@ monitor = Monitor()
 vitals = Vitals()
 
 app=FastAPI(title="Rick's Trackers")
-SOFTWARE_VERSION="2026.10.07.1"
+SOFTWARE_VERSION="2026.10.11.1"
 
 @app.get("/api/version")
 def software_version():
@@ -29,6 +30,27 @@ state={"particle_control_configured":bool(PARTICLE_ACCESS_TOKEN and PARTICLE_DEV
 state.update({"center_pending":False,"center_requested_at":None})
 state.update({"tasking_state":"ready","readiness":"checking","readiness_message":"Checking tracker readiness","device_online":None,"mode_status":"unknown","mode_message":"Checking tracker settings", "_control_checked":0})
 _mode_change_lock=threading.Lock()
+_location_deliveries=OrderedDict()
+_location_delivery_lock=threading.Lock()
+
+def repeated_location_delivery(raw,payload,report_time):
+    # Deduplicate a timed device report, not a position. Two integrations may
+    # publish identical data with slightly different published_at envelopes.
+    # Without a report timestamp we cannot safely distinguish a later fix.
+    if not report_time:
+        return False
+    device=raw.get("coreid",raw.get("device_id",PARTICLE_DEVICE_ID)) if isinstance(raw,dict) else PARTICLE_DEVICE_ID
+    key=hashlib.sha256(json.dumps([device,report_time,payload],sort_keys=True,separators=(",",":"),default=str).encode()).hexdigest()
+    now=time.monotonic()
+    with _location_delivery_lock:
+        while _location_deliveries and now-next(iter(_location_deliveries.values()))>600:
+            _location_deliveries.popitem(last=False)
+        if key in _location_deliveries:
+            return True
+        _location_deliveries[key]=now
+        while len(_location_deliveries)>512:
+            _location_deliveries.popitem(last=False)
+    return False
 
 _alarm_poll_thread=None
 _alarm_poll_thread_lock=threading.Lock()
@@ -209,11 +231,12 @@ def note(t,d):
     state["events"].insert(0,{"title":t,"detail":d,"time":ts})
     state["events"]=state["events"][:50]
     history_record("event",t,d,event_time=ts)
-def timeline(stage,detail="",when=None,kind="info"):
+def timeline(stage,detail="",when=None,kind="info",persist=True):
     ts=when or datetime.now(timezone.utc).isoformat()
     state["timeline"].insert(0,{"stage":stage,"detail":detail,"time":ts,"kind":kind})
     state["timeline"]=state["timeline"][:500]
-    history_record(kind or "timeline",stage,detail,event_time=ts)
+    if persist:
+        history_record(kind or "timeline",stage,detail,event_time=ts)
 
 def iso_from_event_time(v):
     if v is None:return None
@@ -561,10 +584,13 @@ def homebase_history(hours:int=168,limit:int=1000):
             SELECT id,created_at,event_time,category,title,detail,mode,alarm,lat,lon,
                    speed_mph,battery_percent,external_power,lte,gps_fix
             FROM tracker_history
+            WHERE NOT (lat IS NULL AND lon IS NULL AND
+                ((category='location' AND title IN ('GPS LOCATION REPORTED','LOCATION REPORTED'))
+                 OR (category='server' AND title='LOCATION RECEIVED')))
         """
         params=[]
         if hours>0:
-            sql+=" WHERE created_at >= NOW() - make_interval(hours => %s)"
+            sql+=" AND created_at >= NOW() - make_interval(hours => %s)"
             params.append(hours)
         sql+=" ORDER BY created_at DESC LIMIT %s"
         params.append(limit)
@@ -1029,6 +1055,10 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             motion=imu_motion,
             alarm=False,alarm_reason=None,timestamp=timestamp
         )
+        if repeated_location_delivery(raw,payload,report_time):
+            monitor.record("webhook", "duplicate_location")
+            print(f"Particle duplicate location ignored: report_time={report_time}")
+            return {"ok":True,"duplicate":True}
         if imu_motion:
             state["_last_motion_device_time"]=device_event_time
             state["_last_motion_published_at"]=published_at
@@ -1050,10 +1080,14 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
             event_name=raw.get("event") if isinstance(raw,dict) else None
             print(f"Particle event ignored: event={event_name} payload_type={type(payload).__name__}")
             return {"ok":True,"ignored":"non-location or unsupported Particle event"}
+        if repeated_location_delivery(raw,payload,x.timestamp):
+            monitor.record("webhook", "duplicate_location")
+            return {"ok":True,"duplicate":True}
 
-    if report_time or x.timestamp:
-        timeline("GPS LOCATION REPORTED" if x.gps_fix else "LOCATION REPORTED", f"{x.lat:.6f}, {x.lon:.6f} • {report_source}; not a matched ping response", report_time or x.timestamp, "location")
-    timeline("LOCATION RECEIVED", f"{x.lat:.6f}, {x.lon:.6f} • server receipt", webhook_received_at, "server")
+    location_detail=f"{x.lat:.6f}, {x.lon:.6f} • "+("Motion trigger" if x.motion else "Tracker location received")
+    location_detail+=f" • {report_source} • server receipt {webhook_received_at}"
+    # One timeline step and one coordinate-bearing history row per report.
+    timeline("LOCATION UPDATE",location_detail,report_time or x.timestamp or webhook_received_at,"location",persist=False)
     monitor.record("location", "received")
     prev=state["external_power"]
     for k in ["lat","lon","speed_mph","battery_percent","external_power","lte","gps_fix"]:
@@ -1063,7 +1097,7 @@ async def webhook(request:Request,authorization:Optional[str]=Header(default=Non
     state["route"].append({"lat":x.lat,"lon":x.lon});state["route"]=state["route"][-200:]
     history_record(
         "location","LOCATION UPDATE",
-        "Motion trigger" if x.motion else "Tracker location received",
+        location_detail,
         event_time=state["last_seen"],lat=x.lat,lon=x.lon,speed_mph=x.speed_mph,
         battery_percent=x.battery_percent,external_power=x.external_power,lte=x.lte,gps_fix=x.gps_fix
     )
